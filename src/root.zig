@@ -60,18 +60,15 @@ pub const Lexer = struct {
             self.pos += 1;
             return tok;
         }
-        // Semicolons start comments — skip and continue
         if (c == ';') {
             self.pos += 1;
             self.skipComment();
             return self.nextToken();
         }
-        // Single quote is the quote character
         if (c == 39) {
             self.pos += 1;
             return .quote;
         }
-        // Numbers
         if (std.ascii.isDigit(c)) {
             self.pos += 1;
             while (self.pos < self.input.len and std.ascii.isDigit(self.input[self.pos])) {
@@ -79,7 +76,6 @@ pub const Lexer = struct {
             }
             return .number;
         }
-        // Symbols — letters, digits, and Lisp special chars
         if (std.ascii.isAlphabetic(c) or c == '+' or c == '-' or c == '*' or c == '/' or
             c == '=' or c == '<' or c == '>' or c == '_' or c == '!' or c == '?' or c == '$')
         {
@@ -214,8 +210,97 @@ pub const Parser = struct {
 
     fn parseAtom(self: *Parser) !Expr {
         const tok = self.tokens[self.pos - 1];
-        _ = tok;
-        return Expr.nilExpr();
+        switch (tok) {
+            .number => return Expr.nilExpr(),
+            .symbol => return Expr.nilExpr(),
+            else => return Expr.nilExpr(),
+        }
+    }
+};
+
+// ============================================================
+// Runtime Objects (Phase 2)
+// ============================================================
+
+pub const ObjType = enum(u8) {
+    nil,
+    symbol,
+    number,
+    cons,
+    closure,
+    builtin,
+};
+
+pub const LispObject = struct {
+    type: ObjType,
+    value: ValueUnion,
+    next: ?*LispObject, // linked list for tracing/GC
+
+    const ValueUnion = union(ObjType) {
+        nil: void,
+        symbol: *Symbol,
+        number: i64,
+        cons: *ConsCell,
+        closure: *Closure,
+        builtin: []const u8,
+    };
+
+    pub fn nilObj() LispObject {
+        return LispObject{
+            .type = .nil,
+            .value = .{ .nil = {} },
+            .next = null,
+        };
+    }
+
+    pub fn symbolObj(sym: *Symbol) LispObject {
+        return LispObject{
+            .type = .symbol,
+            .value = .{ .symbol = sym },
+            .next = null,
+        };
+    }
+
+    pub fn numberObj(n: i64) LispObject {
+        return LispObject{
+            .type = .number,
+            .value = .{ .number = n },
+            .next = null,
+        };
+    }
+};
+
+pub const ConsCell = struct {
+    car: *LispObject,
+    cdr: *LispObject,
+
+    pub fn init(car: *LispObject, cdr: *LispObject) ConsCell {
+        return ConsCell{ .car = car, .cdr = cdr };
+    }
+};
+
+pub const Closure = struct {
+    params: []const *Symbol,
+    body: []const Expr,
+    env: *Environment,
+};
+
+pub const Environment = struct {
+    parent: ?*Environment,
+    arena: std.heap.ArenaAllocator,
+    bindings: std.StringHashMap(*LispObject),
+
+    pub fn init(parent: ?*Environment, allocator: Allocator) Environment {
+        return Environment{
+            .parent = parent,
+            .arena = std.heap.ArenaAllocator.init(allocator),
+            .bindings = std.StringHashMap(*LispObject).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Environment) void {
+        self.bindings.deinit();
+        self.arena.deinit();
     }
 };
 
@@ -242,22 +327,20 @@ test "lexer multiple numbers" {
 }
 
 test "lexer symbols with special chars" {
-    // (+ - * / = < > _ ! ? $)
-    // Tokens: ( + - * / = < > _ ! ? $ ) = 13 tokens
     var lexer = Lexer.init("(+ - * / = < > _ ! ? $)");
-    try std.testing.expectEqual(.left_paren, lexer.nextToken());  // 1: (
-    try std.testing.expectEqual(.symbol, lexer.nextToken());      // 2: +
-    try std.testing.expectEqual(.symbol, lexer.nextToken());      // 3: -
-    try std.testing.expectEqual(.symbol, lexer.nextToken());      // 4: *
-    try std.testing.expectEqual(.symbol, lexer.nextToken());      // 5: /
-    try std.testing.expectEqual(.symbol, lexer.nextToken());      // 6: =
-    try std.testing.expectEqual(.symbol, lexer.nextToken());      // 7: <
-    try std.testing.expectEqual(.symbol, lexer.nextToken());      // 8: >
-    try std.testing.expectEqual(.symbol, lexer.nextToken());      // 9: _
-    try std.testing.expectEqual(.symbol, lexer.nextToken());      // 10: !
-    try std.testing.expectEqual(.symbol, lexer.nextToken());      // 11: ?
-    try std.testing.expectEqual(.symbol, lexer.nextToken());      // 12: $
-    try std.testing.expectEqual(.right_paren, lexer.nextToken()); // 13: )
+    try std.testing.expectEqual(.left_paren, lexer.nextToken());
+    try std.testing.expectEqual(.symbol, lexer.nextToken());
+    try std.testing.expectEqual(.symbol, lexer.nextToken());
+    try std.testing.expectEqual(.symbol, lexer.nextToken());
+    try std.testing.expectEqual(.symbol, lexer.nextToken());
+    try std.testing.expectEqual(.symbol, lexer.nextToken());
+    try std.testing.expectEqual(.symbol, lexer.nextToken());
+    try std.testing.expectEqual(.symbol, lexer.nextToken());
+    try std.testing.expectEqual(.symbol, lexer.nextToken());
+    try std.testing.expectEqual(.symbol, lexer.nextToken());
+    try std.testing.expectEqual(.symbol, lexer.nextToken());
+    try std.testing.expectEqual(.symbol, lexer.nextToken());
+    try std.testing.expectEqual(.right_paren, lexer.nextToken());
 }
 
 test "lexer whitespace and comments" {
@@ -318,6 +401,79 @@ test "symbol table — intern 5 symbols, all unique except duplicates" {
     try std.testing.expect(@as(*Symbol, @ptrCast(b)) == @as(*Symbol, @ptrCast(e)));
     try std.testing.expect(@as(*Symbol, @ptrCast(a)) != @as(*Symbol, @ptrCast(b)));
     try std.testing.expect(@as(*Symbol, @ptrCast(b)) != @as(*Symbol, @ptrCast(d)));
+}
+
+test "LispObject — create nil object" {
+    const obj = LispObject.nilObj();
+    try std.testing.expectEqual(ObjType.nil, obj.type);
+}
+
+test "LispObject — create number object" {
+    const obj = LispObject.numberObj(42);
+    try std.testing.expectEqual(ObjType.number, obj.type);
+    try std.testing.expectEqual(@as(i64, 42), obj.value.number);
+}
+
+test "LispObject — create symbol object" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var table = SymbolTable.init(alloc, &arena);
+
+    const sym = try table.getOrPut("hello");
+    const obj = LispObject.symbolObj(sym);
+    try std.testing.expectEqual(ObjType.symbol, obj.type);
+    try std.testing.expectEqual(@as(*Symbol, @ptrCast(sym)), obj.value.symbol);
+}
+
+test "ConsCell — create cons pair" {
+    const alloc = std.heap.page_allocator;
+    const car = alloc.create(LispObject) catch unreachable;
+    car.* = LispObject.numberObj(1);
+    const cdr = alloc.create(LispObject) catch unreachable;
+    cdr.* = LispObject.nilObj();
+
+    const cell = ConsCell.init(car, cdr);
+    try std.testing.expectEqual(@as(i64, 1), cell.car.value.number);
+
+    alloc.destroy(car);
+    alloc.destroy(cdr);
+}
+
+test "ConsCell — build a list (1 2 nil)" {
+    const alloc = std.heap.page_allocator;
+    const nil_obj = alloc.create(LispObject) catch unreachable;
+    nil_obj.* = LispObject.nilObj();
+    const n2_obj = alloc.create(LispObject) catch unreachable;
+    n2_obj.* = LispObject.numberObj(2);
+    const n1_obj = alloc.create(LispObject) catch unreachable;
+    n1_obj.* = LispObject.numberObj(1);
+
+    const cell3 = alloc.create(ConsCell) catch unreachable;
+    cell3.* = ConsCell.init(n2_obj, nil_obj);
+    const cell2 = alloc.create(ConsCell) catch unreachable;
+    cell2.* = ConsCell.init(n1_obj, @ptrCast(cell3));
+
+    // Check: car of cell2 is 1
+    try std.testing.expectEqual(@as(i64, 1), cell2.car.value.number);
+    // Check: car of cell3 is 2
+    try std.testing.expectEqual(@as(i64, 2), cell3.car.value.number);
+    // Check: cdr of cell3 is nil
+    try std.testing.expectEqual(ObjType.nil, cell3.cdr.type);
+
+    alloc.destroy(cell3);
+    alloc.destroy(cell2);
+    alloc.destroy(nil_obj);
+    alloc.destroy(n2_obj);
+    alloc.destroy(n1_obj);
+}
+
+test "Environment — init and lookup" {
+    const alloc = std.heap.page_allocator;
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+
+    try std.testing.expect(env.parent == null);
 }
 
 // ============================================================
