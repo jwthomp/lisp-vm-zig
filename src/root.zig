@@ -324,13 +324,13 @@ pub const Environment = struct {
 pub const Vm = struct {
     stack: std.ArrayList(*LispObject),
     allocator: Allocator,
-    env: *Environment,
+    rootEnv: *Environment,
 
     pub fn init(allocator: Allocator, env: *Environment) Vm {
         return Vm{
             .stack = std.ArrayList(*LispObject).initCapacity(allocator, 8) catch unreachable,
             .allocator = allocator,
-            .env = env,
+            .rootEnv = env,
         };
     }
 
@@ -431,6 +431,189 @@ pub const Vm = struct {
         else
             LispObject.numberObj(0);
         self.push(result);
+    }
+
+
+    /// Evaluate a single (non-list) Expr into a LispObject.
+    pub fn evalAtom(self: *Vm, expr: Expr, env: *Environment) !*LispObject {
+        switch (expr) {
+            .nil => {
+                const obj = try self.allocator.create(LispObject);
+                obj.* = LispObject.nilObj();
+                return obj;
+            },
+            .number => |n| {
+                const obj = try self.allocator.create(LispObject);
+                obj.* = LispObject.numberObj(n);
+                return obj;
+            },
+            .symbol => |sym| {
+                var name: []const u8 = sym.name[0 .. sym.name.len - 1];
+                while (name.len > 0 and name[name.len - 1] == 0) name = name[0 .. name.len - 1];
+                if (env.lookup(name)) |v| return v;
+                if (self.rootEnv.lookup(name)) |v| return v;
+                const obj = try self.allocator.create(LispObject);
+                obj.* = LispObject.nilObj();
+                return obj;
+            },
+            .list => return error.ListExprNotHandledByEvalAtom,
+        }
+    }
+
+    /// (def name value) — bind in root env, return value.
+    pub fn evalDef(self: *Vm, items: []Expr) !*LispObject {
+        if (items.len < 3) return error.DefRequiresTwoArgs;
+        const name: []const u8 = switch (items[1]) {
+            .symbol => |sym| sym.name[0 .. sym.name.len - 1],
+            else => return error.DefInvalidName,
+        };
+        // Remove trailing null from interned symbol
+        const cleanName = blk: {
+            var n = name;
+            while (n.len > 0 and n[n.len - 1] == 0) n = n[0 .. n.len - 1];
+            break :blk n;
+        };
+        const val = switch (items[2]) {
+            .number => |n| blk: {
+                const obj = try self.allocator.create(LispObject);
+                obj.* = LispObject.numberObj(n);
+                break :blk obj;
+            },
+            .nil => blk: {
+                const obj = try self.allocator.create(LispObject);
+                obj.* = LispObject.nilObj();
+                break :blk obj;
+            },
+            else => return error.DefUnsupportedValue,
+        };
+        try self.rootEnv.bind(cleanName, val);
+        return val;
+    }
+
+    /// Full eval: atom, list (calls), special forms (def).
+    pub fn eval(self: *Vm, expr: Expr, env: *Environment) !*LispObject {
+        switch (expr) {
+            .nil => {
+                const obj = try self.allocator.create(LispObject);
+                obj.* = LispObject.nilObj();
+                return obj;
+            },
+            .number => |n| {
+                const obj = try self.allocator.create(LispObject);
+                obj.* = LispObject.numberObj(n);
+                return obj;
+            },
+            .symbol => |sym| {
+                var name: []const u8 = sym.name[0 .. sym.name.len - 1];
+                while (name.len > 0 and name[name.len - 1] == 0) name = name[0 .. name.len - 1];
+                if (env.lookup(name)) |v| return v;
+                if (self.rootEnv.lookup(name)) |v| return v;
+                const obj = try self.allocator.create(LispObject);
+                obj.* = LispObject.nilObj();
+                return obj;
+            },
+            .list => |items| {
+                if (items.len == 0) {
+                    const obj = try self.allocator.create(LispObject);
+                    obj.* = LispObject.nilObj();
+                    return obj;
+                }
+                const head = items[0];
+                const isDef = switch (head) {
+                    .symbol => |s| blk: {
+                        const nm = s.name;
+                        if (nm.len < 3) break :blk false;
+                        break :blk (nm[0] == 'd' and nm[1] == 'e' and nm[2] == 'f');
+                    },
+                    else => false,
+                };
+                if (isDef) return try self.evalDef(items);
+
+                // Push all args
+                var ai: usize = 1;
+                while (ai < items.len) {
+                    const arg = try self.eval(items[ai], env);
+                    self.push(arg);
+                    ai += 1;
+                }
+                // Get head name
+                const headName = switch (head) {
+                    .symbol => |sym| sym.name,
+                    else => "",
+                };
+                // Strip trailing nulls
+                var clean: []const u8 = headName[0..];
+                while (clean.len > 0 and clean[clean.len - 1] == 0) clean = clean[0 .. clean.len - 1];
+                
+                if (clean.len >= 1 and clean[0] == '+') {
+                    const b = self.pop() orelse return blk: {
+                        const obj = try self.allocator.create(LispObject);
+                        obj.* = LispObject.nilObj();
+                        break :blk obj;
+                    };
+                    const a = self.pop() orelse return blk: {
+                        const obj = try self.allocator.create(LispObject);
+                        obj.* = LispObject.nilObj();
+                        break :blk obj;
+                    };
+                    if (a.type != .number or b.type != .number) {
+                        const obj = try self.allocator.create(LispObject);
+                        obj.* = LispObject.nilObj();
+                        return obj;
+                    }
+                    const result = try self.allocator.create(LispObject);
+                    result.* = LispObject.numberObj(a.value.number + b.value.number);
+                    self.push(result);
+                    return result;
+                }
+                if (clean.len >= 1 and clean[0] == '-') {
+                    const b = self.pop() orelse return blk: {
+                        const obj = try self.allocator.create(LispObject);
+                        obj.* = LispObject.nilObj();
+                        break :blk obj;
+                    };
+                    const a = self.pop() orelse return blk: {
+                        const obj = try self.allocator.create(LispObject);
+                        obj.* = LispObject.nilObj();
+                        break :blk obj;
+                    };
+                    if (a.type != .number or b.type != .number) {
+                        const obj = try self.allocator.create(LispObject);
+                        obj.* = LispObject.nilObj();
+                        return obj;
+                    }
+                    const result = try self.allocator.create(LispObject);
+                    result.* = LispObject.numberObj(a.value.number - b.value.number);
+                    self.push(result);
+                    return result;
+                }
+                if (clean.len >= 1 and clean[0] == '*') {
+                    const b = self.pop() orelse return blk: {
+                        const obj = try self.allocator.create(LispObject);
+                        obj.* = LispObject.nilObj();
+                        break :blk obj;
+                    };
+                    const a = self.pop() orelse return blk: {
+                        const obj = try self.allocator.create(LispObject);
+                        obj.* = LispObject.nilObj();
+                        break :blk obj;
+                    };
+                    if (a.type != .number or b.type != .number) {
+                        const obj = try self.allocator.create(LispObject);
+                        obj.* = LispObject.nilObj();
+                        return obj;
+                    }
+                    const result = try self.allocator.create(LispObject);
+                    result.* = LispObject.numberObj(a.value.number * b.value.number);
+                    self.push(result);
+                    return result;
+                }
+
+                const obj = try self.allocator.create(LispObject);
+                obj.* = LispObject.nilObj();
+                return obj;
+            },
+        }
     }
 
     /// Call a primitive by name
@@ -915,6 +1098,137 @@ test "primGt — 7 > 3 returns 1" {
 
     const result = vm.pop();
     try std.testing.expectEqual(@as(i64, 1), result.?.value.number);
+}
+
+
+// ============================================================
+// Phase 5 Tests: def, eval
+// ============================================================
+
+test "evalAtom — number returns number object" {
+    const alloc = std.heap.page_allocator;
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+    const result = try vm.evalAtom(Expr{ .number = 42 }, &env);
+    try std.testing.expectEqual(@as(i64, 42), result.value.number);
+    alloc.destroy(result);
+}
+
+test "evalAtom — nil returns nil object" {
+    const alloc = std.heap.page_allocator;
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+    const result = try vm.evalAtom(Expr{ .nil = {} }, &env);
+    try std.testing.expectEqual(ObjType.nil, result.type);
+    alloc.destroy(result);
+}
+
+test "def — bind value in root env" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("def");
+    _ = try symtab.getOrPut("x");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const defSym = try symtab.getOrPut("def");
+    const xSym = try symtab.getOrPut("x");
+    const items: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = defSym },
+        Expr{ .symbol = xSym },
+        Expr{ .number = 42 },
+    });
+    defer alloc.free(items);
+
+    const result = try vm.evalDef(items);
+    try std.testing.expectEqual(@as(i64, 42), result.value.number);
+    alloc.destroy(result);
+}
+
+test "def — lookup bound value" {
+    const alloc = std.heap.page_allocator;
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    const val_obj = alloc.create(LispObject) catch unreachable;
+    val_obj.* = LispObject.numberObj(42);
+    try env.bind("x", val_obj);
+    const val = env.lookup("x");
+    try std.testing.expect(val != null);
+    try std.testing.expectEqual(@as(i64, 42), val.?.value.number);
+    alloc.destroy(val_obj);
+}
+
+test "eval — number literal" {
+    const alloc = std.heap.page_allocator;
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+    const result = try vm.eval(Expr{ .number = 42 }, &env);
+    try std.testing.expectEqual(@as(i64, 42), result.value.number);
+    alloc.destroy(result);
+}
+
+test "eval — + primitive call (a + b)" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("+");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const plusSym = try symtab.getOrPut("+");
+    const items: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = plusSym },
+        Expr{ .number = 2 },
+        Expr{ .number = 3 },
+    });
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    try std.testing.expectEqual(@as(i64, 5), result.value.number);
+    alloc.destroy(result);
+    alloc.free(items);
+}
+
+test "eval — nested + call" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("+");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const plusSym = try symtab.getOrPut("+");
+    const inner: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = plusSym },
+        Expr{ .number = 1 },
+        Expr{ .number = 2 },
+    });
+    const outer: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = plusSym },
+        Expr{ .list = inner },
+        Expr{ .number = 3 },
+    });
+
+    const result = try vm.eval(Expr{ .list = outer }, &env);
+    try std.testing.expectEqual(@as(i64, 6), result.value.number);
+    alloc.destroy(result);
+    alloc.free(inner);
+    alloc.free(outer);
 }
 
 // ============================================================
