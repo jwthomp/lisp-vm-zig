@@ -219,7 +219,7 @@ pub const Parser = struct {
 };
 
 // ============================================================
-// Runtime Objects (Phase 2)
+// Runtime Objects
 // ============================================================
 
 pub const ObjType = enum(u8) {
@@ -234,7 +234,7 @@ pub const ObjType = enum(u8) {
 pub const LispObject = struct {
     type: ObjType,
     value: ValueUnion,
-    next: ?*LispObject, // linked list for tracing/GC
+    next: ?*LispObject,
 
     const ValueUnion = union(ObjType) {
         nil: void,
@@ -246,27 +246,15 @@ pub const LispObject = struct {
     };
 
     pub fn nilObj() LispObject {
-        return LispObject{
-            .type = .nil,
-            .value = .{ .nil = {} },
-            .next = null,
-        };
+        return LispObject{ .type = .nil, .value = .{ .nil = {} }, .next = null };
     }
 
     pub fn symbolObj(sym: *Symbol) LispObject {
-        return LispObject{
-            .type = .symbol,
-            .value = .{ .symbol = sym },
-            .next = null,
-        };
+        return LispObject{ .type = .symbol, .value = .{ .symbol = sym }, .next = null };
     }
 
     pub fn numberObj(n: i64) LispObject {
-        return LispObject{
-            .type = .number,
-            .value = .{ .number = n },
-            .next = null,
-        };
+        return LispObject{ .type = .number, .value = .{ .number = n }, .next = null };
     }
 };
 
@@ -285,6 +273,10 @@ pub const Closure = struct {
     env: *Environment,
 };
 
+// ============================================================
+// Environment (Phase 3)
+// ============================================================
+
 pub const Environment = struct {
     parent: ?*Environment,
     arena: std.heap.ArenaAllocator,
@@ -302,12 +294,163 @@ pub const Environment = struct {
         self.bindings.deinit();
         self.arena.deinit();
     }
+
+    /// Lookup a value by symbol name. Searches current frame then parents.
+    pub fn lookup(self: *Environment, name: []const u8) ?*LispObject {
+        if (self.bindings.get(name)) |val| {
+            return val;
+        }
+        if (self.parent) |parent| {
+            return parent.lookup(name);
+        }
+        return null;
+    }
+
+    /// Bind a value in the current frame.
+    pub fn bind(self: *Environment, name: []const u8, val: *LispObject) !void {
+        try self.bindings.put(name, val);
+    }
+
+    /// Create a child environment with one binding.
+    pub fn child(self: *Environment, allocator: Allocator) Environment {
+        return Environment.init(self, allocator);
+    }
+};
+
+// ============================================================
+// Vm — stack-based evaluator
+// ============================================================
+
+pub const Vm = struct {
+    stack: std.ArrayList(*LispObject),
+    allocator: Allocator,
+    env: *Environment,
+
+    pub fn init(allocator: Allocator, env: *Environment) Vm {
+        return Vm{
+            .stack = std.ArrayList(*LispObject).initCapacity(allocator, 8) catch unreachable,
+            .allocator = allocator,
+            .env = env,
+        };
+    }
+
+    pub fn deinit(self: *Vm) void {
+        self.stack.deinit(self.allocator);
+    }
+
+    pub fn push(self: *Vm, obj: *LispObject) void {
+        self.stack.appendAssumeCapacity(obj);
+    }
+
+    pub fn pop(self: *Vm) ?*LispObject {
+        if (self.stack.items.len > 0) return self.stack.pop(); return null;
+    }
+
+    pub fn peek(self: *Vm) ?*LispObject {
+        if (self.stack.items.len == 0) return null;
+        return self.stack.items[self.stack.items.len - 1];
+    }
+
+    pub fn drop(self: *Vm, n: usize) void {
+        const len = self.stack.items.len;
+        if (n >= len) {
+            self.stack.clearRetainingCapacity();
+        } else {
+            self.stack.shrinkRetainingCapacity(len - n);
+        }
+    }
+
+    // Primitives (Phase 4)
+    pub fn primAdd(self: *Vm) !void {
+        const b = self.pop() orelse return error.StackUnderflow;
+        const a = self.pop() orelse return error.StackUnderflow;
+        if (a.type != .number or b.type != .number) {
+            return error.TypeError;
+        }
+        const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
+        result.* = LispObject.numberObj(a.value.number + b.value.number);
+        self.push(result);
+    }
+
+    pub fn primSub(self: *Vm) !void {
+        const a = self.pop() orelse return error.StackUnderflow;
+        const b = self.pop() orelse return error.StackUnderflow;
+        if (a.type != .number or b.type != .number) return error.TypeError;
+        const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
+        result.* = LispObject.numberObj(a.value.number - b.value.number);
+        self.push(result);
+    }
+
+    pub fn primMul(self: *Vm) !void {
+        const b = self.pop() orelse return error.StackUnderflow;
+        const a = self.pop() orelse return error.StackUnderflow;
+        if (a.type != .number or b.type != .number) return error.TypeError;
+        const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
+        result.* = LispObject.numberObj(a.value.number * b.value.number);
+        self.push(result);
+    }
+
+    pub fn primDiv(self: *Vm) !void {
+        const a = self.pop() orelse return error.StackUnderflow;
+        const b = self.pop() orelse return error.StackUnderflow;
+        if (a.type != .number or b.type != .number) return error.TypeError;
+        if (b.value.number == 0) return error.DivisionByZero;
+        const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
+        result.* = LispObject.numberObj(@divTrunc(a.value.number, b.value.number));
+        self.push(result);
+    }
+
+    pub fn primEq(self: *Vm) !void {
+        const b = self.pop() orelse return error.StackUnderflow;
+        const a = self.pop() orelse return error.StackUnderflow;
+        const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
+        result.* = if (a.type == .number and b.type == .number)
+            LispObject.numberObj(if (a.value.number == b.value.number) 1 else 0)
+        else
+            LispObject.numberObj(0);
+        self.push(result);
+    }
+
+    pub fn primLt(self: *Vm) !void {
+        const a = self.pop() orelse return error.StackUnderflow;
+        const b = self.pop() orelse return error.StackUnderflow;
+        const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
+        result.* = if (a.type == .number and b.type == .number)
+            LispObject.numberObj(if (a.value.number < b.value.number) 1 else 0)
+        else
+            LispObject.numberObj(0);
+        self.push(result);
+    }
+
+    pub fn primGt(self: *Vm) !void {
+        const a = self.pop() orelse return error.StackUnderflow;
+        const b = self.pop() orelse return error.StackUnderflow;
+        const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
+        result.* = if (a.type == .number and b.type == .number)
+            LispObject.numberObj(if (a.value.number > b.value.number) 1 else 0)
+        else
+            LispObject.numberObj(0);
+        self.push(result);
+    }
+
+    /// Call a primitive by name
+    pub fn callPrim(self: *Vm, name: []const u8) !void {
+        if (std.mem.eql(u8, name, "+")) return try self.primAdd();
+        if (std.mem.eql(u8, name, "-")) return try self.primSub();
+        if (std.mem.eql(u8, name, "*")) return try self.primMul();
+        if (std.mem.eql(u8, name, "/")) return try self.primDiv();
+        if (std.mem.eql(u8, name, "=")) return try self.primEq();
+        if (std.mem.eql(u8, name, "<")) return try self.primLt();
+        if (std.mem.eql(u8, name, ">")) return try self.primGt();
+        return error.UnknownPrimitive;
+    }
 };
 
 // ============================================================
 // Tests
 // ============================================================
 
+// --- Lexer tests ---
 test "lexer basic tokens" {
     var lexer = Lexer.init("(+ 1)");
     try std.testing.expectEqual(.left_paren, lexer.nextToken());
@@ -351,12 +494,12 @@ test "lexer whitespace and comments" {
     try std.testing.expectEqual(.right_paren, lexer.nextToken());
 }
 
+// --- Symbol table tests ---
 test "symbol table — intern same name returns same pointer" {
     const alloc = std.heap.page_allocator;
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     var table = SymbolTable.init(alloc, &arena);
-
     const sym1 = try table.getOrPut("foo");
     const sym2 = try table.getOrPut("foo");
     try std.testing.expectEqual(@as(*Symbol, @ptrCast(sym1)), @as(*Symbol, @ptrCast(sym2)));
@@ -367,7 +510,6 @@ test "symbol table — different names are different pointers" {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     var table = SymbolTable.init(alloc, &arena);
-
     const sym1 = try table.getOrPut("foo");
     const sym2 = try table.getOrPut("bar");
     try std.testing.expect(@as(*Symbol, @ptrCast(sym1)) != @as(*Symbol, @ptrCast(sym2)));
@@ -378,31 +520,29 @@ test "symbol table — contains check" {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     var table = SymbolTable.init(alloc, &arena);
-
     try std.testing.expect(!table.contains("foo"));
     _ = try table.getOrPut("foo");
     try std.testing.expect(table.contains("foo"));
     try std.testing.expect(!table.contains("bar"));
 }
 
-test "symbol table — intern 5 symbols, all unique except duplicates" {
+test "symbol table — intern 5 symbols" {
     const alloc = std.heap.page_allocator;
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     var table = SymbolTable.init(alloc, &arena);
-
     const a = try table.getOrPut("x");
     const b = try table.getOrPut("y");
     const c = try table.getOrPut("x");
     const d = try table.getOrPut("z");
     const e = try table.getOrPut("y");
-
     try std.testing.expect(@as(*Symbol, @ptrCast(a)) == @as(*Symbol, @ptrCast(c)));
     try std.testing.expect(@as(*Symbol, @ptrCast(b)) == @as(*Symbol, @ptrCast(e)));
     try std.testing.expect(@as(*Symbol, @ptrCast(a)) != @as(*Symbol, @ptrCast(b)));
     try std.testing.expect(@as(*Symbol, @ptrCast(b)) != @as(*Symbol, @ptrCast(d)));
 }
 
+// --- LispObject tests ---
 test "LispObject — create nil object" {
     const obj = LispObject.nilObj();
     try std.testing.expectEqual(ObjType.nil, obj.type);
@@ -419,23 +559,21 @@ test "LispObject — create symbol object" {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     var table = SymbolTable.init(alloc, &arena);
-
     const sym = try table.getOrPut("hello");
     const obj = LispObject.symbolObj(sym);
     try std.testing.expectEqual(ObjType.symbol, obj.type);
     try std.testing.expectEqual(@as(*Symbol, @ptrCast(sym)), obj.value.symbol);
 }
 
+// --- ConsCell tests ---
 test "ConsCell — create cons pair" {
     const alloc = std.heap.page_allocator;
     const car = alloc.create(LispObject) catch unreachable;
     car.* = LispObject.numberObj(1);
     const cdr = alloc.create(LispObject) catch unreachable;
     cdr.* = LispObject.nilObj();
-
     const cell = ConsCell.init(car, cdr);
     try std.testing.expectEqual(@as(i64, 1), cell.car.value.number);
-
     alloc.destroy(car);
     alloc.destroy(cdr);
 }
@@ -448,19 +586,13 @@ test "ConsCell — build a list (1 2 nil)" {
     n2_obj.* = LispObject.numberObj(2);
     const n1_obj = alloc.create(LispObject) catch unreachable;
     n1_obj.* = LispObject.numberObj(1);
-
     const cell3 = alloc.create(ConsCell) catch unreachable;
     cell3.* = ConsCell.init(n2_obj, nil_obj);
     const cell2 = alloc.create(ConsCell) catch unreachable;
     cell2.* = ConsCell.init(n1_obj, @ptrCast(cell3));
-
-    // Check: car of cell2 is 1
     try std.testing.expectEqual(@as(i64, 1), cell2.car.value.number);
-    // Check: car of cell3 is 2
     try std.testing.expectEqual(@as(i64, 2), cell3.car.value.number);
-    // Check: cdr of cell3 is nil
     try std.testing.expectEqual(ObjType.nil, cell3.cdr.type);
-
     alloc.destroy(cell3);
     alloc.destroy(cell2);
     alloc.destroy(nil_obj);
@@ -468,12 +600,321 @@ test "ConsCell — build a list (1 2 nil)" {
     alloc.destroy(n1_obj);
 }
 
+// --- Environment tests ---
 test "Environment — init and lookup" {
     const alloc = std.heap.page_allocator;
     var env = Environment.init(null, alloc);
     defer env.deinit();
-
     try std.testing.expect(env.parent == null);
+}
+
+test "Environment — bind and lookup in same frame" {
+    const alloc = std.heap.page_allocator;
+    const obj = alloc.create(LispObject) catch unreachable;
+    obj.* = LispObject.numberObj(42);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    errdefer alloc.destroy(obj);
+    try env.bind("x", obj);
+    const val = env.lookup("x");
+    try std.testing.expect(val != null);
+    try std.testing.expectEqual(@as(i64, 42), val.?.value.number);
+}
+
+test "Environment — lookup in parent frame" {
+    const alloc = std.heap.page_allocator;
+    const parent_obj = alloc.create(LispObject) catch unreachable;
+    parent_obj.* = LispObject.numberObj(10);
+    var parent = Environment.init(null, alloc);
+    defer parent.deinit();
+    errdefer alloc.destroy(parent_obj);
+    try parent.bind("x", parent_obj);
+
+    var child = parent.child(alloc);
+    defer child.deinit();
+
+    const val = child.lookup("x");
+    try std.testing.expect(val != null);
+    try std.testing.expectEqual(@as(i64, 10), val.?.value.number);
+}
+
+test "Environment — shadowing" {
+    const alloc = std.heap.page_allocator;
+    const inner_obj = alloc.create(LispObject) catch unreachable;
+    inner_obj.* = LispObject.numberObj(99);
+    const parent_obj = alloc.create(LispObject) catch unreachable;
+    parent_obj.* = LispObject.numberObj(10);
+    var parent = Environment.init(null, alloc);
+    defer parent.deinit();
+    errdefer alloc.destroy(parent_obj);
+    try parent.bind("x", parent_obj);
+
+    var child = parent.child(alloc);
+    defer child.deinit();
+    errdefer alloc.destroy(inner_obj);
+    try child.bind("x", inner_obj);
+
+    const val = child.lookup("x");
+    try std.testing.expectEqual(@as(i64, 99), val.?.value.number);
+}
+
+// --- Vm stack tests ---
+test "Vm — push and pop" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const obj = alloc.create(LispObject) catch unreachable;
+    obj.* = LispObject.numberObj(42);
+    errdefer alloc.destroy(obj);
+
+    vm.push(obj);
+    const popped = vm.pop();
+    try std.testing.expect(popped != null);
+    try std.testing.expectEqual(@as(i64, 42), popped.?.value.number);
+}
+
+test "Vm — peek does not remove" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const obj = alloc.create(LispObject) catch unreachable;
+    obj.* = LispObject.numberObj(7);
+    errdefer alloc.destroy(obj);
+
+    vm.push(obj);
+    const peeked = vm.peek();
+    try std.testing.expect(peeked != null);
+    try std.testing.expectEqual(@as(i64, 7), peeked.?.value.number);
+    const popped = vm.pop();
+    try std.testing.expectEqual(@as(i64, 7), popped.?.value.number);
+}
+
+test "Vm — drop" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    for (0..5) |i| {
+        const obj = alloc.create(LispObject) catch unreachable;
+        obj.* = LispObject.numberObj(@intCast(i));
+        errdefer alloc.destroy(obj);
+        vm.push(obj);
+    }
+    vm.drop(2);
+    try std.testing.expectEqual(@as(usize, 3), vm.stack.items.len);
+}
+
+// --- Primitive tests ---
+test "primAdd — 2 + 3 = 5" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const a = alloc.create(LispObject) catch unreachable;
+    a.* = LispObject.numberObj(2);
+    const b = alloc.create(LispObject) catch unreachable;
+    b.* = LispObject.numberObj(3);
+    errdefer alloc.destroy(b);
+    errdefer alloc.destroy(a);
+
+    vm.push(b);
+    vm.push(a);
+    try vm.primAdd();
+
+    const result = vm.pop();
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(i64, 5), result.?.value.number);
+}
+
+test "primSub — 10 - 4 = 6" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const b = alloc.create(LispObject) catch unreachable;
+    b.* = LispObject.numberObj(4);
+    const a = alloc.create(LispObject) catch unreachable;
+    a.* = LispObject.numberObj(10);
+    errdefer alloc.destroy(a);
+    errdefer alloc.destroy(b);
+
+    vm.push(b);
+    vm.push(a);
+    try vm.primSub();
+
+    const result = vm.pop();
+    try std.testing.expectEqual(@as(i64, 6), result.?.value.number);
+}
+
+test "primMul — 3 * 4 * 5" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const c = alloc.create(LispObject) catch unreachable;
+    c.* = LispObject.numberObj(5);
+    const b = alloc.create(LispObject) catch unreachable;
+    b.* = LispObject.numberObj(4);
+    const a = alloc.create(LispObject) catch unreachable;
+    a.* = LispObject.numberObj(3);
+    errdefer alloc.destroy(c);
+    errdefer alloc.destroy(b);
+    errdefer alloc.destroy(a);
+
+    vm.push(c);
+    vm.push(b);
+    try vm.primMul();
+    vm.push(a);
+    try vm.primMul();
+
+    const result = vm.pop();
+    try std.testing.expectEqual(@as(i64, 60), result.?.value.number);
+}
+
+test "primDiv — 20 / 4 = 5" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const b = alloc.create(LispObject) catch unreachable;
+    b.* = LispObject.numberObj(4);
+    const a = alloc.create(LispObject) catch unreachable;
+    a.* = LispObject.numberObj(20);
+    errdefer alloc.destroy(b);
+    errdefer alloc.destroy(a);
+
+    vm.push(b);
+    vm.push(a);
+    try vm.primDiv();
+
+    const result = vm.pop();
+    try std.testing.expectEqual(@as(i64, 5), result.?.value.number);
+}
+
+test "primEq — 5 == 5 returns 1" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const b = alloc.create(LispObject) catch unreachable;
+    b.* = LispObject.numberObj(5);
+    const a = alloc.create(LispObject) catch unreachable;
+    a.* = LispObject.numberObj(5);
+    errdefer alloc.destroy(b);
+    errdefer alloc.destroy(a);
+
+    vm.push(b);
+    vm.push(a);
+    try vm.primEq();
+
+    const result = vm.pop();
+    try std.testing.expectEqual(@as(i64, 1), result.?.value.number);
+}
+
+test "primEq — 3 == 7 returns 0" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const b = alloc.create(LispObject) catch unreachable;
+    b.* = LispObject.numberObj(7);
+    const a = alloc.create(LispObject) catch unreachable;
+    a.* = LispObject.numberObj(3);
+    errdefer alloc.destroy(b);
+    errdefer alloc.destroy(a);
+
+    vm.push(b);
+    vm.push(a);
+    try vm.primEq();
+
+    const result = vm.pop();
+    try std.testing.expectEqual(@as(i64, 0), result.?.value.number);
+}
+
+test "primLt — 3 < 7 returns 1" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const b = alloc.create(LispObject) catch unreachable;
+    b.* = LispObject.numberObj(7);
+    const a = alloc.create(LispObject) catch unreachable;
+    a.* = LispObject.numberObj(3);
+    errdefer alloc.destroy(b);
+    errdefer alloc.destroy(a);
+
+    vm.push(b);
+    vm.push(a);
+    try vm.primLt();
+
+    const result = vm.pop();
+    try std.testing.expectEqual(@as(i64, 1), result.?.value.number);
+}
+
+test "primGt — 7 > 3 returns 1" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const b = alloc.create(LispObject) catch unreachable;
+    b.* = LispObject.numberObj(3);
+    const a = alloc.create(LispObject) catch unreachable;
+    a.* = LispObject.numberObj(7);
+    errdefer alloc.destroy(b);
+    errdefer alloc.destroy(a);
+
+    vm.push(b);
+    vm.push(a);
+    try vm.primGt();
+
+    const result = vm.pop();
+    try std.testing.expectEqual(@as(i64, 1), result.?.value.number);
 }
 
 // ============================================================
