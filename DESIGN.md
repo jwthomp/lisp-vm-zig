@@ -1,26 +1,41 @@
-# Lisp VM — Design Document
+# Lisp VM — Design Document (Zig 0.16.0)
 
 ## 1. Architecture Overview
 
 ```
-Source Code ──► Lexer ──► Tokens ──► Parser ──► AST ──► Vm.eval ──► LispObject
-                                        │                        ▲
-                                        │                        │
-                                   SymbolTable (internment)   Environment
+Source ──► Lexer ──► []Token ──► Parser ──► Expr (AST)
+                                         │
+                              SymbolTable (internment)
+                                         │
+                          ┌──────────────┴──────────────┐
+                          │    Vm.eval() / evalList()   │
+                          └──────────────┬──────────────┘
+                                         │
+                          ┌──────────────┴──────────────┐
+                          │    Environment (scoping)    │
+                          └──────────────┬──────────────┘
+                                         │
+                          ┌──────────────┴──────────────┐
+                          │    Vm.stack []LispObject    │
+                          └──────────────┬──────────────┘
+                                         │
+                          ┌──────────────┴──────────────┐
+                          │    LispObject (runtime)     │
+                          └─────────────────────────────┘
 ```
 
 ### Layers
-1. **Lexer**: `source ──► []Token` — skip whitespace, comments, recognize symbols/numbers/parens
-2. **SymbolTable**: `symbol name ──► *Symbol` — one canonical allocation per unique symbol name
-3. **Parser**: `[]Token ──► Expr` — recursive descent with depth limit
-4. **Vm**: `Expr ──► LispObject` — stack-based evaluator with environment and closures
-5. **LispObject**: runtime values — numbers, symbols, lists, closures, builtins
+1. **Lexer**: `source []u8 ──► []Token` — skips whitespace/comments, emits typed tokens
+2. **SymbolTable**: `name []u8 ──► *Symbol` — single canonical allocation per unique name
+3. **Parser**: `[]Token ──► Expr` — recursive descent; returns `Expr.list` for parenthesized groups
+4. **Vm.eval**: `Expr ──► *LispObject` — traverses AST, uses stack + environment
+5. **LispObject**: runtime values — numbers, symbols, cons cells, closures, builtins
 
 ---
 
 ## 2. Data Structures
 
-### 2.1 Token (done)
+### 2.1 Token
 ```zig
 pub const Token = enum(u8) {
     left_paren, right_paren, semicolon, quote, symbol, number, eof,
@@ -30,253 +45,780 @@ pub const Token = enum(u8) {
 - `toToken(c: u8) ?Token` for single-char punctuation
 
 ### 2.2 Symbol Internment
-Each unique symbol name has exactly one heap allocation. All references to the same symbol
-name point to the same `*Symbol` struct via pointer comparison. This makes `eq` a simple
-pointer equality check and enables O(1) symbol table lookups.
+Each unique symbol name has exactly **one** heap allocation. All references point to the same `*Symbol`
+via pointer comparison. This makes `eq` a simple pointer-equality check (`ptr1 == ptr2`) and
+enables O(1) lookups.
 
-**Implementation:**
 ```zig
-pub const SymbolTable = struct {
-    arena: std.heap.ArenaAllocator,
-    table: StringHashMap(*Symbol),
-    allocator: Allocator,
-
-    pub fn getOrPut(self: *SymbolTable, name: []const u8) !*Symbol
-    // Returns the canonical *Symbol for this name.
-    // Allocates a new one if not yet interned.
+pub const Symbol = struct {
+    name: [:0]const u8,  // null-terminated for stable hashing
 };
 
-pub const Symbol = struct {
-    name: [:0]const u8,  // null-terminated for C interop
+pub const SymbolTable = struct {
+    allocator: std.mem.Allocator,
+    arena: *std.heap.ArenaAllocator,  // short-lived AST scope
+    table: std.StringHashMap(*Symbol), // back arena for string keys
+
+    pub fn getOrPut(name: []const u8) !*Symbol {
+        // Returns canonical *Symbol. Allocates new one if not yet interned.
+        // Key is dupeZ'd into arena. Value ptr stored in table.
+    }
+    pub fn contains(name: []const u8) bool
 };
 ```
 
-### 2.3 AST — Expr (partially done)
-Currently only stores `list: []Expr` and `nil`. Need to add:
+### 2.3 AST — Expr
 ```zig
 pub const Expr = union(enum) {
-    symbol: *Symbol,       // interned
+    symbol: *Symbol,  // interned via SymbolTable
     number: i64,
-    list: []Expr,
+    list: []Expr,     // ordered: [head, arg1, arg2, ...]
     nil,
 };
 ```
 
-### 2.4 LispObject — runtime values
+### 2.4 LispObject — Runtime Values
 ```zig
 pub const ObjType = enum(u8) {
-    nil, atom, number, cons, closure, builtin, macro,
+    nil, symbol, number, cons, closure, builtin,
 };
 
 pub const LispObject = struct {
     type: ObjType,
     value: ValueUnion,
-    next: *LispObject,  // linked list for GC
+    next: ?*LispObject,  // linked list for future GC marking
 };
 
 const ValueUnion = union(ObjType) {
     nil: void,
-    atom: []const u8,      // cached name string
+    symbol: *Symbol,
     number: i64,
     cons: *ConsCell,
     closure: *Closure,
-    builtin: []const u8,   // function name
-    macro: *Macro,
+    builtin: []const u8,  // name of builtin, for dispatch
 };
 ```
 
-### 2.5 Cons Cell (Lisp list node)
+### 2.5 ConsCell
 ```zig
 pub const ConsCell = struct {
-    car: *LispObject,
-    cdr: *LispObject,
+    car: *LispObject,  // first element
+    cdr: *LispObject,  // rest (another cons or nil)
 };
 ```
+Lisp list `(1 2 3)` = `ConsCell(1, ConsCell(2, ConsCell(3, nil)))`
 
 ### 2.6 Closure
 ```zig
 pub const Closure = struct {
-    parameters: []const *Symbol,
-    body: []Expr,
-    env: *Environment,
+    params: []const *Symbol,  // parameter names from (fn (x y ...) body...)
+    body: []const Expr,       // body expressions (AST, not runtime values)
+    env: *Environment,        // captured environment at definition time
 };
 ```
 
-### 2.7 Environment (scoping)
+### 2.7 Environment
 ```zig
 pub const Environment = struct {
-    parent: ?*Environment,
-    arena: std.heap.ArenaAllocator,
-    bindings: StringHashMap(*LispObject),
+    parent: ?*Environment,            // lexical parent scope
+    arena: std.heap.ArenaAllocator,   // frame-local allocations
+    bindings: std.StringHashMap(*LispObject),  // name → value
 
-    pub fn lookup(self: *Environment, sym: *Symbol) ?*LispObject
-    pub fn bind(self: *Environment, sym: *Symbol, val: *LispObject) void
-    pub fn bindNew(self: *Environment, sym: *Symbol, val: *LispObject) void
+    pub fn lookup(name: []const u8) ?*LispObject {
+        // Search current frame → parent → ... → root. Returns first match.
+    }
+    pub fn bind(name: []const u8, val: *LispObject) !void {
+        // Insert into current frame's bindings map.
+    }
+    pub fn child(allocator: Allocator) Environment {
+        // Create new frame with this env as parent.
+    }
 };
 ```
 
 ---
 
-## 3. Evaluation Model (stack-based)
+## 3. Evaluation Model
 
-The VM uses a call stack of LispObjects and a local variable environment.
+### 3.1 The Eval/Apply Loop
+
+This is the core of every Lisp implementation. The evaluator is a recursive
+function that walks the AST and pushes runtime values onto the VM stack.
 
 ```
-Stack: [top] obj_n, obj_{n-1}, ..., obj_0 [bottom]
-Env:   [top] frame_n → frame_{n-1} → ... → frame_0 → root
+eval(expr, env) → *LispObject
 ```
 
-### 3.1 Stack Operations
-- `push(val)` — push LispObject onto stack
-- `pop() ?*LispObject` — remove and return top
-- `peek() ?*LispObject` — return top without removing
-- `drop(n)` — remove n items from top
-- `swap()` — swap top two items
-- `dup()` — duplicate top item
+**Algorithm:**
 
-### 3.2 Call Model
 ```
-EVAL expr → push(result)
-APPLY fn [args] → pop fn, pop args, create closure frame, push result
-TAILCALL fn [args] → same as APPLY but REUSE stack frame (no allocation)
+eval(expr, env):
+    switch expr:
+        Expr.nil:
+            return nilObj()
+
+        Expr.number(n):
+            return numberObj(n)
+
+        Expr.symbol(sym):
+            // Variable lookup: find the value bound to this symbol
+            return env.lookup(sym.name) orelse error.UndefinedVariable
+
+        Expr.list(items):
+            if items is empty:
+                return nilObj()
+
+            // First, evaluate the head — this is the function
+            let head = eval(items[0], env)
+
+            // Evaluate all arguments
+            let argVals = []
+            for item in items[1:]:
+                argVals.append(eval(item, env))
+
+            // Apply the function
+            return apply(head, argVals, env)
 ```
 
-### 3.3 Tail-Call Optimization
-When the compiler emits a tailcall, the VM:
-1. Pops the current function frame
-2. Pushes new arguments onto the same stack
-3. Jumps to the function body directly (no new stack frame)
+**Apply function:**
+
+```
+apply(fn: *LispObject, args: []*LispObject, env: *Environment):
+    switch fn.type:
+        ObjType.builtin:
+            // Dispatch to primitive implementation
+            return callBuiltin(fn.value.builtin, args)
+
+        ObjType.closure:
+            let cl = fn.value.closure
+            // Create child environment (captures parent bindings)
+            let childEnv = env.child(allocator)
+
+            // Bind parameters to evaluated arguments
+            for i in 0..params.length:
+                if i < params.length and i < args.length:
+                    childEnv.bind(params[i].name, args[i])
+
+            // Evaluate body sequentially
+            let result = nilObj()
+            for expr in cl.body:
+                result = eval(expr, childEnv)
+            return result
+
+        ObjType.nil:
+            return error.NotAFunction
+```
+
+**Key insight:** `apply` is what makes Lisp homoiconic. Lists are calls.
+`(f a b c)` evaluates `f` to get a function value, then calls `apply(f, [a_val, b_val, c_val])`.
+
+### 3.2 Special Forms
+
+Special forms **break** the normal eval/apply pattern. Their arguments are NOT
+all evaluated first. Instead, the evaluator handles them directly:
+
+| Form | Behavior | Args Evaluated? |
+|------|----------|-----------------|
+| `quote` | Return arg unevaluated | No |
+| `if` | Evaluate test; eval then/else branch | Only test, plus one branch |
+| `def` | Evaluate value; bind in root env | Value only |
+| `let` | Create child env; bind pairs; eval body | Values of bindings, body is always evaluated |
+| `fn` | Create closure (capture params + body) | No — body stays as AST |
+| `defn` | `def` + `fn` shortcut | Name + value only |
+| `do` | Evaluate all args, return last | All args |
+| `cond` | Expand to nested `if` | First matching clause |
+
+**Special form implementation:**
+
+```zig
+// In Vm.eval(), before the normal dispatch:
+fn eval(self: *Vm, expr: Expr, env: *Environment) !*LispObject {
+    switch expr {
+        .list => |items| {
+            if (items.len == 0) return &nilObj;
+            const headExpr = items[0];
+
+            switch (headExpr) {
+                .symbol => |sym| {
+                    if (std.mem.eql(u8, sym.name, "if")) return try self.evalIf(items, env);
+                    if (std.mem.eql(u8, sym.name, "quote")) return try self.evalQuote(items, env);
+                    if (std.mem.eql(u8, sym.name, "def")) return try self.evalDef(items, env);
+                    if (std.mem.eql(u8, sym.name, "let")) return try self.evalLet(items, env);
+                    if (std.mem.eql(u8, sym.name, "fn")) return try self.evalFn(items, env);
+                    if (std.mem.eql(u8, sym.name, "do")) return try self.evalDo(items, env);
+                    if (std.mem.eql(u8, sym.name, "cond")) return try self.evalCond(items, env);
+                },
+                else => {},
+            }
+
+            // Not a special form — normal function call
+            return try self.evalCall(items, env);
+        },
+        else => return try self.evalAtom(expr, env),
+    }
+}
+```
+
+### 3.3 Stack Model
+
+The VM maintains a stack of `*LispObject` pointers:
+
+```
+Stack:  [top]  obj_n, obj_{n-1}, ..., obj_1, obj_0  [bottom]
+```
+
+**Operations:**
+| Op | Action |
+|----|--------|
+| `push(val)` | Append to end of ArrayList |
+| `pop() ?*LispObject` | Remove last, return it |
+| `peek() ?*LispObject` | Return last without removing |
+| `drop(n)` | Shrink list by n from end |
+| `swap()` | Exchange top two items |
+| `dup()` | Copy top item and push again |
+
+**In evaluation**, the stack is used to accumulate arguments before applying primitives:
+```
+(+ 2 3)
+  eval(2) → push number(2)
+  eval(3) → push number(3)
+  callPrim("+") → pop 3, pop 2, compute 5, push number(5)
+```
 
 ---
 
 ## 4. Primitive Functions
 
-Built-in functions that operate on LispObjects:
+### 4.1 Dispatch Table
 
-| Function | Stack before | Stack after | Description |
-|----------|-------------|-------------|-------------|
-| `+` | `a b` | `a+b` | Add two numbers |
-| `-` | `a b` | `a-b` | Subtract |
-| `*` | `a b` | `a*b` | Multiply |
-| `/` | `a b` | `a/b` | Divide (integer) |
-| `=` | `a b` | `true/false` | Equality |
-| `<` | `a b` | `true/false` | Less than |
-| `>` | `a b` | `true/false` | Greater than |
-| `cons` | `a b` | `(a . b)` | Cons cell |
-| `car` | `(a . b)` | `a` | First element |
-| `cdr` | `(a . b)` | `b` | Rest of list |
-| `null?` | `x` | `true/false` | Is nil? |
-| `symbol?` | `x` | `true/false` | Is symbol? |
-| `number?` | `x` | `true/false` | Is number? |
-| `list?` | `x` | `true/false` | Is cons cell? |
-| `print` | `x` | `nil` | Print to stdout |
-| `length` | `lst` | `n` | List length |
-| `quote` | `x` | `x` | Return unevaluated |
-
----
-
-## 5. Build Order
-
-### Phase 1: Symbol Internment (Foundation)
-- [ ] **Task 1.1**: Implement `SymbolTable` with `getOrPut(name) -> *Symbol`
-  - Test: same name returns same pointer
-  - Test: different names return different pointers
-- [ ] **Task 1.2**: Add `symbol: *Symbol` to `Expr` union
-  - Test: parse `"foo"` produces `Expr.symbol` with canonical pointer
-
-### Phase 2: Runtime Objects (LispObject)
-- [ ] **Task 2.1**: Implement `LispObject` with `ObjType` union and GC linked list
-  - Test: create nil/number/symbol/cons objects
-- [ ] **Task 2.2**: Implement `ConsCell` with `car`/`cdr`
-  - Test: build (1 2 3) as cons cells
-- [ ] **Task 2.3**: Implement `Closure` with parameters, body, env
-  - Test: create closure from defn AST
-
-### Phase 3: Environment & Scoping
-- [ ] **Task 3.1**: Implement `Environment` with parent chain and `StringHashMap` bindings
-  - Test: bind + lookup in same frame
-  - Test: lookup in parent frame
-  - Test: shadowing (inner frame overrides outer)
-- [ ] **Task 3.2**: Implement stack operations (push/pop/peek/drop/swapped/dup)
-  - Test: push/pop roundtrip
-  - Test: dup/swapped
-  - Test: drop N items
-
-### Phase 4: Primitives (Core Language)
-- [ ] **Task 4.1**: Implement arithmetic (`+`, `-`, `*`, `/`)
-  - Test: `(+) = 0`, `(+ 1 2) = 3`, `(+ 1 2 3) = 6`
-  - Test: `(- 10 5) = 5`
-  - Test: `(* 2 3 4) = 24`
-  - Test: `(/ 10 2) = 5`
-- [ ] **Task 4.2**: Implement comparison (`=`, `<`, `>`, `null?`)
-  - Test: `(= 1 1) = true`, `(= 1 2) = false`
-  - Test: `(< 1 2) = true`, `(> 3 2) = true`
-  - Test: `(null? nil) = true`, `(null? 1) = false`
-- [ ] **Task 4.3**: Implement list operations (`cons`, `car`, `cdr`, `null?`, `list?`)
-  - Test: `(cons 1 nil) = (1)`
-  - Test: `(car (1 2)) = 1`, `(cdr (1 2)) = (2)`
-  - Test: `(length (1 2 3)) = 3`
-
-### Phase 5: Variable Binding & Defn
-- [ ] **Task 5.1**: Implement `def` special form
-  - Test: `(def x 42) → set x to 42`
-  - Test: `(def x 42) → x → 42`
-- [ ] **Task 5.2**: Implement `let` special form
-  - Test: `(let (x 1) (+ x 1)) = 2`
-  - Test: `(let (x 1) (let (x 2) x)) = 2`
-
-### Phase 6: Conditionals & Control Flow
-- [ ] **Task 6.1**: Implement `if` special form
-  - Test: `(if true 1 2) = 1`
-  - Test: `(if false 1 2) = 2`
-- [ ] **Task 6.2**: Implement `cond` special form
-  - Test: multi-clause cond
-
-### Phase 7: Functions & Closures
-- [ ] **Task 7.1**: Implement `fn` special form (anonymous functions)
-  - Test: `(fn (x) (+ x 1))` creates a closure
-- [ ] **Task 7.2**: Implement function application
-  - Test: `((fn (x) (+ x 1)) 5) = 6`
-  - Test: nested calls
-- [ ] **Task 7.3**: Implement `defn` special form (named functions)
-  - Test: `(defn add (a b) (+ a b))` + call
-
-### Phase 8: Tail-Call Optimization
-- [ ] **Task 8.1**: Implement `tailcall` bytecode instruction
-  - VM pops current frame and reuses stack for callee
-- [ ] **Task 8.2**: Compiler detects tail calls
-  - Test: recursive factorial uses constant stack
-
-### Phase 9: REPL & Extras
-- [ ] **Task 9.1**: Add REPL loop (read → eval → print)
-- [ ] **Task 9.2**: Implement `print` primitive
-- [ ] **Task 9.3**: Implement `macro` support (optional, later)
-
----
-
-## 6. Test Strategy
-
-Every task must have at least one test. Tests are added to `src/root.zig` using Zig's
-built-in `test` keyword.
+Primitives are dispatched by name in `Vm.callPrim(name, stack)` which pops
+arguments, computes, and pushes the result:
 
 ```zig
-test "primitive + basic" {
-    var vm = Vm.init(page_allocator);
-    defer vm.deinit();
-    
-    const result = try vm.evalString("(+ 1 2 3)");
-    const num = try asNumber(result);
-    try std.testing.expectEqual(@as(i64, 6), num);
+pub fn callPrim(self: *Vm, name: []const u8) !void {
+    if (std.mem.eql(u8, name, "+")) return try self.primArithmetic(.add);
+    if (std.mem.eql(u8, name, "-")) return try self.primArithmetic(.sub);
+    // ... etc.
+    return error.UnknownPrimitive;
 }
 ```
 
-Run all tests: `zig test src/root.zig`
+### 4.2 Arithmetic (`+`, `-`, `*`, `/`)
+
+These take **N arguments** (not just 2), computing left-to-right or folding:
+
+```
+(+ 1 2 3) → (((1 + 2) + 3)) = 6
+(+ ) → 0
+(- 10 5 2) → ((10 - 5) - 2) = 3
+(* 2 3 4) → 24
+(/ 20 4) → 5  (integer division via @divTrunc)
+```
+
+**Stack protocol:**
+```
+Stack before: [..., arg_n, ..., arg_2, arg_1]  (arg_1 is top)
+Pop args N times → collect values
+Fold left-to-right: result = arg_N
+For i = N-1 downto 1: result = result op arg_i
+Push result
+```
+
+### 4.3 Comparison (`=`, `<`, `>`)
+
+These take **exactly 2 arguments** and return `1` (true) or `0` (false):
+
+```
+(= 1 1) → 1
+(= 1 2) → 0
+(< 3 7) → 1
+(> 7 3) → 1
+```
+
+### 4.4 List Operations (`cons`, `car`, `cdr`, `length`)
+
+```
+cons a b → ConsCell(a, b)
+car (a . b) → a
+cdr (a . b) → b
+null? x → true if x is nil, false otherwise
+list? x → true if x is a ConsCell, false otherwise
+length lst → count cons cells (walk cdr chain)
+```
+
+**`length` algorithm:**
+```
+let n = 0
+let curr = arg
+while curr.type == .cons:
+    curr = curr.value.cons.cdr
+    n += 1
+return numberObj(n)
+```
+
+### 4.5 `print`
+
+```
+print x → write formatted value to stdout, return nil
+```
+Format: numbers as digits, symbols as name, nil as `nil`, lists recursively.
 
 ---
 
-## 7. Known Constraints
+## 5. Special Forms — Detailed Design
 
-- Zig 0.16.0: `ArrayList` requires allocator in `deinit()` and `toOwnedSlice()`
-- ArenaAllocator is used for AST (short-lived); GC heap for runtime objects (long-lived)
-- No garbage collector yet — objects are reference-counted via ArenaAllocator scope
-- Symbol internment uses `StringHashMap` backed by ArenaAllocator
+### 5.1 `quote`
+```
+(quote x) → return x unevaluated
+'x       → sugar for (quote x)
+```
+**Implementation:** Return the AST node as-is, wrapped in `nilObj()` for the
+symbol case, or evaluate number normally (numbers don't need quoting).
+
+Actually, `quote` returns the **runtime value** of the quoted expression:
+```
+(quote (+ 1 2))  → returns the list as a ConsCell, NOT evaluated
+(quote foo)      → returns nilObj() (symbols are looked up normally, so this is tricky)
+(quote 42)       → returns numberObj(42)
+```
+
+Wait — in Lisp, `(quote foo)` returns the symbol object, not the value bound to `foo`.
+So `quote` needs to return a LispObject representing the syntactic entity, not the
+environment lookup. For symbols, this is a nil-like marker or the symbol object itself.
+
+**Implementation:**
+```zig
+fn evalQuote(self: *Vm, items: []Expr) !*LispObject {
+    const arg = items[1];
+    switch arg {
+        .number => return &self.numberObj(arg.number),
+        .symbol => return &nilObj,  // or store symbol reference
+        .list => {
+            // Convert AST list to ConsCell list on heap
+            return try self.astListToConsCell(arg.list);
+        },
+        else => return &nilObj,
+    }
+}
+```
+
+### 5.2 `if`
+```
+(if test then else)
+  1. Evaluate test
+  2. If test != nil (truthy), evaluate and return then
+  3. Otherwise, evaluate and return else
+```
+**Key:** Only ONE branch is evaluated. The unevaluated branch stays as AST.
+
+```zig
+fn evalIf(self: *Vm, items: []Expr, env: *Environment) !*LispObject {
+    const testExpr = items[1];
+    const thenExpr = if (items.len > 2) items[2] else Expr.nil;
+    const elseExpr = if (items.len > 3) items[3] else Expr.nil;
+
+    const testVal = try self.eval(testExpr, env);
+    if (testVal.type != .nil) {
+        return try self.eval(thenExpr, env);
+    } else {
+        return try self.eval(elseExpr, env);
+    }
+}
+```
+
+### 5.3 `def`
+```
+(def x 42)  → evaluate 42, bind to x in root env, return 42
+```
+Binds in the **root** (topmost) environment, accessible from anywhere.
+
+```zig
+fn evalDef(self: *Vm, items: []Expr, env: *Environment) !*LispObject {
+    const nameExpr = items[1];
+    const valExpr = items[2];
+    // name can be a symbol — use its interned name string
+    const name: []const u8 = switch (nameExpr) {
+        .symbol => |s| s.name[0..s.name.len - 1],  // strip null terminator
+        else => return error.DefInvalidName,
+    };
+    const val = try self.eval(valExpr, env);
+    errdefer self.allocator.destroy(val);
+    try env.bind(name, val);
+    return val;
+}
+```
+
+### 5.4 `let`
+```
+(let (x 1 y 2) (+ x y))  → 3
+  1. Create child environment
+  2. Parse pairs: [(x, 1), (y, 2)]
+  3. Evaluate each value, bind to each name in child env
+  4. Evaluate body in child env
+  5. Return result; child env is destroyed (arena scope)
+```
+
+```zig
+fn evalLet(self: *Vm, items: []Expr, env: *Environment) !*LispObject {
+    const bindingsExpr = items[1];   // AST list of pairs
+    const bodyExprs = items[2..];     // remaining body expressions
+
+    // Create child environment
+    let childEnv = env.child(self.allocator);
+    errdefer childEnv.deinit();
+
+    // Parse binding pairs from bindingsExpr.list
+    const pairs = bindingsExpr.list;  // [name1, val1, name2, val2, ...]
+    var i: usize = 0;
+    while (i + 1 < pairs.len) {
+        const name = try self.atomToName(pairs[i]);
+        const val = try self.eval(pairs[i + 1], env);  // eval in PARENT env
+        errdefer self.allocator.destroy(val);
+        try childEnv.bind(name, val);
+        i += 2;
+    }
+
+    // Evaluate body in child env, return last expression
+    var result = childEnv.lookup("__nil__") orelse &nilObj;
+    for (bodyExprs) |expr| {
+        result = try self.eval(expr, childEnv);
+    }
+    return result;
+}
+```
+
+### 5.5 `fn`
+```
+(fn (x y) (+ x y))  → returns a Closure value
+```
+Creates a closure that captures:
+- `params`: the symbol list `(x y)`
+- `body`: all remaining expressions after params
+- `env`: the current environment (lexical capture)
+
+```zig
+fn evalFn(self: *Vm, items: []Expr, env: *Environment) !*LispObject {
+    const paramsExpr = items[1];    // AST list of symbols
+    const bodyExprs = items[2..];
+
+    // Convert param symbols to []*Symbol
+    var params: [16]*Symbol = undefined;
+    var paramCount: usize = 0;
+    if (paramsExpr.type == .list) {
+        for (paramsExpr.list) |symExpr| {
+            if (symExpr.type == .symbol) {
+                params[paramCount] = symExpr.symbol;
+                paramCount += 1;
+            }
+        }
+    }
+
+    // Duplicate body slice (arena-allocated, survives this frame)
+    const body = try self.allocator.dupe(Expr, bodyExprs);
+
+    // Create closure object on the GC heap
+    let closure = try self.allocator.create(Closure);
+    closure.* = Closure{
+        .params = params[0..paramCount],
+        .body = body,
+        .env = env,  // NOTE: this needs to be a reference, not owned
+    };
+
+    // Wrap in LispObject
+    let obj = try self.allocator.create(LispObject);
+    obj.* = LispObject{
+        .type = .closure,
+        .value = .{ .closure = closure },
+        .next = null,
+    };
+    return obj;
+}
+```
+
+### 5.6 `defn`
+Syntactic sugar for `def` + `fn`:
+```
+(defn add (a b) (+ a b))
+```
+Expands to:
+```
+(def add (fn (a b) (+ a b)))
+```
+
+### 5.7 `do`
+```
+(do (print 1) (print 2) 42)  → prints both, returns 42
+```
+Evaluates all arguments sequentially; returns the last.
+
+```zig
+fn evalDo(self: *Vm, items: []Expr, env: *Environment) !*LispObject {
+    var result: *LispObject = &nilObj;
+    for (items[1..]) |expr| {
+        result = try self.eval(expr, env);
+    }
+    return result;
+}
+```
+
+### 5.8 `cond`
+```
+(cond
+  (> x 10) "big"
+  (< x 0)  "neg"
+  true     "small")
+```
+Expands to nested `if`:
+```
+(if (> x 10) "big"
+  (if (< x 0) "neg"
+    (if true "small" nil)))
+```
+
+---
+
+## 6. Tail-Call Optimization (TCO)
+
+### 6.1 Why TCO?
+Without TCO, deeply recursive Lisp programs exhaust the call stack:
+```
+(factorial 10000) → stack overflow
+```
+
+### 6.2 Two Approaches
+
+**Approach A: Direct Eval (simple, no bytecode)**
+The `eval` function is a `while` loop instead of recursion. When a function call
+is detected in tail position, we replace the current expression and loop back:
+
+```zig
+fn eval(self: *Vm, expr: Expr, env: *Environment) !*LispObject {
+    var current = expr;
+    while (true) {
+        switch (evalAtom(current, env)) {
+            .number, .symbol => return val,
+            .nil => return &nilObj,
+            .list => {
+                // If in tail position, don't push a stack frame — just loop
+                const result = try self.applyList(current.list, env);
+                // If result is itself a list in tail position, loop again
+                if (result.type == .list) {
+                    current = try self.consCellToExpr(result);  // materialize
+                    continue;
+                }
+                return result;
+            },
+            .closure => {
+                // Closure application — create child env, eval body
+                // Body's last expression is in tail position → loop
+                let body = val.closure.body;
+                let childEnv = env.child(allocator);
+                // ... bind args ...
+                current = body[body.len - 1];  // last expr
+                env = childEnv;
+                continue;  // TCO: reuse current frame
+            },
+        }
+    }
+}
+```
+
+**Approach B: Bytecode (later, for macros)**
+Compile AST to bytecodes. Emit `TAILCALL` instead of `CALL` in tail position.
+VM pops current frame and jumps to target. More complex but enables:
+- `defmacro` — macros return AST which gets compiled and called
+- Trampolining — return `{:tailcall, fn, args}` and handle externally
+- Better optimization opportunities
+
+**Decision:** Implement Approach A first. Add bytecode in Phase 8 when macros
+are needed.
+
+---
+
+## 7. Memory Management
+
+### 7.1 Arena Allocator (AST)
+```
+Phase 1: Parse source → Expr AST (arena-allocated)
+Phase 2: Evaluate AST → LispObjects (GC heap)
+Phase 3: Close REPL session → destroy arena, destroy GC heap
+```
+
+The `ArenaAllocator` is used for:
+- Symbol table keys (dupeZ of symbol names)
+- AST node slices (list of Expr)
+- Temporary allocations during parsing
+
+### 7.2 GC Heap (LispObjects)
+```zig
+const gcHeap = std.heap.GeneralPurposeAllocator(.{}){};
+defer gcHeap.deinit();
+```
+
+Runtime values live on the general heap because they survive multiple REPL
+iterations. The `next` pointer in `LispObject` is reserved for a future
+mark-and-sweep GC:
+
+```
+GC Algorithm (future):
+  1. Clear all `marked` flags on objects
+  2. Root scan: mark all objects reachable from stack + environment
+  3. Trace: for each marked object, recursively mark its children (car, cdr)
+  4. Sweep: free all unmarked objects
+```
+
+### 7.3 Error Handling
+All `create()` calls check for `OutOfMemory`. All primitive operations check for
+`StackUnderflow` and type errors. Errors propagate up via Zig's error unions:
+
+```zig
+pub fn eval(self: *Vm, expr: Expr, env: *Environment) !*LispObject {
+    // Returns error{OutOfMemory, StackUnderflow, TypeError, UndefinedVariable, ...}
+}
+```
+
+---
+
+## 8. REPL
+
+### 8.1 Loop Structure
+```
+loop:
+    print prompt "> "
+    line = read from stdin
+    if line is empty or "quit", break
+    tokens = tokenize(line)
+    expr = parse(tokens)
+    result = eval(expr, env)
+    print formatted result
+    goto loop
+```
+
+### 8.2 Formatting Output
+```
+nilObj   → "nil"
+numberObj(n) → string(n)
+symbolObj(s) → s.name
+consCell → "(recursive list print)"
+closure  → "#<closure>"
+builtin  → "#<builtin>"
+```
+
+---
+
+## 9. Build Order & Milestones
+
+| Phase | Component | Tests Required | Status |
+|-------|-----------|---------------|--------|
+| **1** | Lexer, SymbolTable, Expr | 8 | ✅ Done |
+| **2** | LispObject, ConsCell, Closure, Environment | 8 | ✅ Done |
+| **3** | Env scoping, Vm stack ops | 7 | ✅ Done |
+| **4** | Primitives: +, -, *, /, =, <, > | 7 | ✅ Done |
+| **5** | `def`, `let` | 4 | 🔲 |
+| **6** | `if`, `cond`, `do` | 5 | 🔲 |
+| **7** | `fn`, `defn`, closure application | 6 | 🔲 |
+| **8** | Tail-call optimization | 3 | 🔲 |
+| **9** | REPL, `print`, `cons`/`car`/`cdr` | 8 | 🔲 |
+| **10**| `null?`/`symbol?`/`number?`/`list?` | 4 | 🔲 |
+| **11**| `length`, `quote` | 3 | 🔲 |
+
+### Total: 54+ tests across 11 phases
+
+---
+
+## 10. Test Strategy
+
+Every task has at least one test. Tests live in `src/root.zig` using Zig's
+built-in `test` keyword.
+
+**Testing patterns:**
+```zig
+// Stack primitive test
+test "primAdd — 2 + 3 = 5" {
+    const alloc = std.heap.page_allocator;
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const a = try alloc.create(LispObject); a.* = LispObject.numberObj(2);
+    const b = try alloc.create(LispObject); b.* = LispObject.numberObj(3);
+    errdefer alloc.destroy(b); errdefer alloc.destroy(a);
+
+    vm.push(b); vm.push(a);
+    try vm.primAdd();
+    const result = try vm.pop();
+    try std.testing.expectEqual(@as(i64, 5), result.value.number);
+}
+
+// Eval test (higher level)
+test "eval (+ 1 2) returns 3" {
+    const alloc = std.heap.page_allocator;
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // Build Expr.list([symbol:"+", number:1, number:2]) manually
+    const plusSym = try symtab.getOrPut("+");
+    const expr = Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = plusSym },
+        Expr{ .number = 1 },
+        Expr{ .number = 2 },
+    }) };
+
+    const result = try vm.eval(expr, &env);
+    try std.testing.expectEqual(@as(i64, 3), result.value.number);
+}
+```
+
+**Run all tests:** `zig test src/root.zig`
+
+---
+
+## 11. API Surface (Vm)
+
+```zig
+pub const Vm = struct {
+    allocator: Allocator,
+    stack: ArrayList(*LispObject),
+    rootEnv: *Environment,   // for 'def' to bind in top-level scope
+
+    pub fn init(allocator: Allocator, env: *Environment) !Vm;
+    pub fn deinit(self: *Vm) void;
+
+    // Stack ops
+    pub fn push(self: *Vm, obj: *LispObject) void;
+    pub fn pop(self: *Vm) ?*LispObject;
+    pub fn peek(self: *Vm) ?*LispObject;
+    pub fn drop(self: *Vm, n: usize) void;
+
+    // Eval
+    pub fn eval(self: *Vm, expr: Expr, env: *Environment) !*LispObject;
+    pub fn evalList(self: *Vm, items: []Expr, env: *Environment) ![]LispObject;
+
+    // Special forms
+    pub fn evalIf(self: *Vm, items: []Expr, env: *Environment) !*LispObject;
+    pub fn evalQuote(self: *Vm, items: []Expr) !*LispObject;
+    pub fn evalDef(self: *Vm, items: []Expr, env: *Environment) !*LispObject;
+    pub fn evalLet(self: *Vm, items: []Expr, env: *Environment) !*LispObject;
+    pub fn evalFn(self: *Vm, items: []Expr, env: *Environment) !*LispObject;
+    pub fn evalDo(self: *Vm, items: []Expr, env: *Environment) !*LispObject;
+
+    // Function application
+    pub fn apply(self: *Vm, fnVal: *LispObject, args: []LispObject, env: *Environment) !*LispObject;
+
+    // Primitives
+    pub fn callPrim(self: *Vm, name: []const u8) !void;
+    // Individual: primAdd, primSub, primMul, primDiv, primEq, primLt, primGt,
+    //            primCons, primCar, primCdr, primNull, primSymbol, primNumber,
+    //            primList, primPrint, primLength
+
+    // Utilities
+    pub fn atomToName(self: *Vm, expr: Expr) ![]const u8;
+    pub fn astListToConsCell(self: *Vm, exprs: []Expr) !*LispObject;
+};
+```
