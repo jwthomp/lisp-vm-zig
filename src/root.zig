@@ -448,10 +448,9 @@ pub const Vm = struct {
                 return obj;
             },
             .symbol => |sym| {
-                var name: []const u8 = sym.name[0 .. sym.name.len - 1];
-                while (name.len > 0 and name[name.len - 1] == 0) name = name[0 .. name.len - 1];
-                if (env.lookup(name)) |v| return v;
-                if (self.rootEnv.lookup(name)) |v| return v;
+                // Use sym.name directly — StringHashMap handles the null terminator
+                if (env.lookup(sym.name)) |v| return v;
+                if (self.rootEnv.lookup(sym.name)) |v| return v;
                 const obj = try self.allocator.create(LispObject);
                 obj.* = LispObject.nilObj();
                 return obj;
@@ -464,14 +463,8 @@ pub const Vm = struct {
     pub fn evalDef(self: *Vm, items: []Expr) !*LispObject {
         if (items.len < 3) return error.DefRequiresTwoArgs;
         const name: []const u8 = switch (items[1]) {
-            .symbol => |sym| sym.name[0 .. sym.name.len - 1],
+            .symbol => |sym| sym.name,
             else => return error.DefInvalidName,
-        };
-        // Remove trailing null from interned symbol
-        const cleanName = blk: {
-            var n = name;
-            while (n.len > 0 and n[n.len - 1] == 0) n = n[0 .. n.len - 1];
-            break :blk n;
         };
         const val = switch (items[2]) {
             .number => |n| blk: {
@@ -486,7 +479,7 @@ pub const Vm = struct {
             },
             else => return error.DefUnsupportedValue,
         };
-        try self.rootEnv.bind(cleanName, val);
+        try self.rootEnv.bind(name, val);
         return val;
     }
 
@@ -554,6 +547,145 @@ pub const Vm = struct {
         return obj;
     }
 
+    /// (fn (params...) body...) — create closure object.
+    pub fn evalFn(self: *Vm, items: []Expr, env: *Environment) !*LispObject {
+        if (items.len < 3) return error.FnRequiresParamsAndBody;
+        const paramsExpr = items[1];
+        const bodyExprs = items[2..];
+
+        // Extract parameter symbols into a heap-allocated array
+        var paramCount: usize = 0;
+        switch (paramsExpr) {
+            .list => |params| {
+                var pi: usize = 0;
+                while (pi < params.len) : (pi += 1) {
+                    switch (params[pi]) {
+                        .symbol => { paramCount += 1; },
+                        else => {},
+                    }
+                }
+            },
+            else => return error.FnParamsMustBeList,
+        }
+
+        const paramArr = try self.allocator.alloc(*Symbol, paramCount);
+        errdefer self.allocator.free(paramArr);
+
+        switch (paramsExpr) {
+            .list => |params| {
+                var pi: usize = 0;
+                var ai: usize = 0;
+                while (pi < params.len and ai < paramCount) : ({
+                    pi += 1;
+                    ai += 1;
+                }) {
+                    switch (params[pi]) {
+                        .symbol => |s| { paramArr[ai] = s; },
+                        else => {},
+                    }
+                }
+            },
+            else => {},
+        }
+
+        // Duplicate body (survives this frame — Exprs are arena-allocated)
+        const body = try self.allocator.dupe(Expr, bodyExprs);
+
+        // Create closure
+        const closure = try self.allocator.create(Closure);
+        closure.* = Closure{
+            .params = paramArr,
+            .body = body,
+            .env = env,
+        };
+
+        // Wrap in LispObject
+        const obj = try self.allocator.create(LispObject);
+        obj.* = LispObject{
+            .type = .closure,
+            .value = .{ .closure = closure },
+            .next = null,
+        };
+        return obj;
+    }
+
+    /// (defn name (params...) body...) — sugar for (def name (fn params body...)).
+    pub fn evalDefn(self: *Vm, items: []Expr, env: *Environment) !*LispObject {
+        if (items.len < 4) return error.DefnRequiresNameParamsAndBody;
+
+        // Extract params list and body: items = [defn, name, params_list, body1, body2, ...]
+        const paramsExpr = items[2];
+        const bodyExprs = items[3..];
+
+        // Build fn items: [fn, params, body1, body2, ...]
+        const fnItems: []Expr = try self.allocator.alloc(Expr, 2 + bodyExprs.len);
+        defer self.allocator.free(fnItems);
+
+        // Get a "fn" symbol from a temp symtab
+        var tempArena = std.heap.ArenaAllocator.init(self.allocator);
+        defer tempArena.deinit();
+        var tempSymtab = SymbolTable.init(self.allocator, &tempArena);
+        const fnSym = try tempSymtab.getOrPut("fn");
+
+        fnItems[0] = Expr{ .symbol = fnSym };
+        fnItems[1] = paramsExpr;
+        var i: usize = 0;
+        while (i < bodyExprs.len) : (i += 1) {
+            fnItems[2 + i] = bodyExprs[i];
+        }
+
+        // Create the closure
+        const closureObj = try self.evalFn(fnItems, env);
+
+        // Get a "def" symbol from temp symtab
+        // Bind directly: rootEnv.bind(name, closureObj)
+        var name: []const u8 = items[1].symbol.name[0..];
+        while (name.len > 0 and name[name.len - 1] == 0) {
+            name = name[0 .. name.len - 1];
+        }
+        try self.rootEnv.bind(name, closureObj);
+        return closureObj;
+    }
+
+    /// Apply a closure: create child env, bind params, evaluate body.
+    pub fn applyClosure(self: *Vm, cl: *Closure, args: []Expr, env: *Environment) !*LispObject {
+        return self._applyClosure(cl, args, env);
+    }
+
+    fn _applyClosure(self: *Vm, cl: *Closure, args: []Expr, env: *Environment) anyerror!*LispObject {
+        // Create child environment with closure's captured env as parent
+        const childArena = try self.allocator.create(std.heap.ArenaAllocator);
+        childArena.* = std.heap.ArenaAllocator.init(self.allocator);
+        const childEnv = try self.allocator.create(Environment);
+        childEnv.* = Environment.init(cl.env, childArena.allocator());
+        defer {
+            childEnv.deinit();
+            self.allocator.destroy(childEnv);
+        }
+
+        // Bind parameters to argument values
+        var ai: usize = 0;
+        while (ai < cl.params.len and ai < args.len) {
+            var paramName: []const u8 = cl.params[ai].name[0..];
+            while (paramName.len > 0 and paramName[paramName.len - 1] == 0) {
+                paramName = paramName[0 .. paramName.len - 1];
+            }
+            const argVal = try self.eval(args[ai], env);
+            try childEnv.bind(paramName, argVal);
+            ai += 1;
+        }
+
+        // Evaluate body sequentially
+        var result: *LispObject = try self.allocator.create(LispObject);
+        result.* = LispObject.nilObj();
+        var i: usize = 0;
+        while (i < cl.body.len) : (i += 1) {
+            self.allocator.destroy(result);
+            result = try self.eval(cl.body[i], childEnv);
+        }
+        return result;
+    }
+
     /// Full eval: atom, list (calls), special forms (def).
     pub fn eval(self: *Vm, expr: Expr, env: *Environment) !*LispObject {
         switch (expr) {
@@ -568,10 +700,9 @@ pub const Vm = struct {
                 return obj;
             },
             .symbol => |sym| {
-                var name: []const u8 = sym.name[0 .. sym.name.len - 1];
-                while (name.len > 0 and name[name.len - 1] == 0) name = name[0 .. name.len - 1];
-                if (env.lookup(name)) |v| return v;
-                if (self.rootEnv.lookup(name)) |v| return v;
+                // Use sym.name directly — StringHashMap handles the null terminator
+                if (env.lookup(sym.name)) |v| return v;
+                if (self.rootEnv.lookup(sym.name)) |v| return v;
                 const obj = try self.allocator.create(LispObject);
                 obj.* = LispObject.nilObj();
                 return obj;
@@ -594,14 +725,43 @@ pub const Vm = struct {
 
                 // Special forms
                 const isDef = clean.len >= 3 and clean[0] == 'd' and clean[1] == 'e' and clean[2] == 'f';
+                const isDefn = clean.len >= 5 and clean[0] == 'd' and clean[1] == 'e' and clean[2] == 'f' and clean[3] == 'n';
                 const isDo = clean.len >= 2 and clean[0] == 'd' and clean[1] == 'o';
+                const isFn = clean.len >= 2 and clean[0] == 'f' and clean[1] == 'n';
                 const isIf = clean.len >= 2 and clean[0] == 'i' and clean[1] == 'f';
                 const isCond = clean.len >= 4 and clean[0] == 'c' and clean[1] == 'o' and clean[2] == 'n' and clean[3] == 'd';
 
                 if (isDef) return try self.evalDef(items);
+                if (isDefn) return try self.evalDefn(items, env);
                 if (isDo) return try self._evalDo(items);
+                if (isFn) return try self.evalFn(items, env);
                 if (isIf) return try self._evalIf(items);
                 if (isCond) return try self._evalCond(items);
+
+                // Closure application: if head symbol resolves to a closure, apply it
+                switch (head) {
+                    .symbol => |sym| {
+                        var symName: []const u8 = sym.name[0..];
+                        while (symName.len > 0 and symName[symName.len - 1] == 0) {
+                            symName = symName[0 .. symName.len - 1];
+                        }
+                        const fnVal = env.lookup(symName) orelse self.rootEnv.lookup(symName);
+                        if (fnVal != null and fnVal.?.type == .closure) {
+                            const argCount = if (items.len > 1) items.len - 1 else 0;
+                            const argExprs = try self.allocator.alloc(Expr, argCount);
+                            defer self.allocator.free(argExprs);
+                            var ci: usize = 0;
+                            while (ci < items.len - 1) {
+                                argExprs[ci] = items[ci + 1];
+                                ci += 1;
+                            }
+                            const result = try self._applyClosure(fnVal.?.value.closure, argExprs, env);
+                            self.push(result);
+                            return result;
+                        }
+                    },
+                    else => {},
+                }
 
                 // Push all args
                 var ai: usize = 1;
@@ -1166,6 +1326,177 @@ test "primGt — 7 > 3 returns 1" {
     try std.testing.expectEqual(@as(i64, 1), result.?.value.number);
 }
 
+
+// ============================================================
+// Phase 7 Tests: fn, defn, closure application
+// ============================================================
+
+test "evalFn — creates closure object" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("fn");
+    _ = try symtab.getOrPut("x");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const fnSym = try symtab.getOrPut("fn");
+    const xSym = try symtab.getOrPut("x");
+
+    // (fn (x) x)
+    const paramsList: []Expr = try alloc.dupe(Expr, &[1]Expr{ Expr{ .symbol = xSym } });
+    defer alloc.free(paramsList);
+    const bodyList: []Expr = try alloc.dupe(Expr, &[1]Expr{ Expr{ .symbol = xSym } });
+    defer alloc.free(bodyList);
+    const items: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = fnSym },
+        Expr{ .list = paramsList },
+        Expr{ .list = bodyList },
+    });
+    defer alloc.free(items);
+
+    const result = try vm.evalFn(items, &env);
+    try std.testing.expectEqual(ObjType.closure, result.type);
+    alloc.destroy(result);
+}
+
+test "evalDefn — creates def + fn binding" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("defn");
+    _ = try symtab.getOrPut("myfunc");
+    _ = try symtab.getOrPut("x");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const defnSym = try symtab.getOrPut("defn");
+    const funcSym = try symtab.getOrPut("myfunc");
+    const xSym = try symtab.getOrPut("x");
+
+    // (defn myfunc (x) x)
+    const paramsList: []Expr = try alloc.dupe(Expr, &[1]Expr{ Expr{ .symbol = xSym } });
+    defer alloc.free(paramsList);
+    const bodyList: []Expr = try alloc.dupe(Expr, &[1]Expr{ Expr{ .symbol = xSym } });
+    defer alloc.free(bodyList);
+    const items: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = defnSym },
+        Expr{ .symbol = funcSym },
+        Expr{ .list = paramsList },
+        Expr{ .list = bodyList },
+    });
+    defer alloc.free(items);
+
+    const result = try vm.evalDefn(items, &env);
+    try std.testing.expectEqual(ObjType.closure, result.type);
+    alloc.destroy(result);
+}
+
+test "closure — apply simple closure" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    const xSym = try symtab.getOrPut("x");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // Build body expression: x
+    const bodyArr: []Expr = try alloc.dupe(Expr, &[1]Expr{ Expr{ .symbol = xSym } });
+    defer alloc.free(bodyArr);
+
+    // Build param array: [xSym]
+    const paramArr = try alloc.alloc(*Symbol, 1);
+    defer alloc.free(paramArr);
+    paramArr[0] = xSym;
+
+    // Create closure manually
+    const closure = try alloc.create(Closure);
+    closure.* = Closure{
+        .params = paramArr,
+        .body = bodyArr,
+        .env = &env,
+    };
+
+    // Create arg: 42
+    const argVal = try alloc.create(LispObject);
+    argVal.* = LispObject.numberObj(42);
+
+    // Create child environment with closure's env as parent
+    const childArena = try alloc.create(std.heap.ArenaAllocator);
+    childArena.* = std.heap.ArenaAllocator.init(alloc);
+    const childEnv = try alloc.create(Environment);
+    childEnv.* = Environment.init(&env, childArena.allocator());
+    try childEnv.bind(xSym.name, argVal);
+
+    // Evaluate body: x -> should find 42 in childEnv
+    const bodyExpr = bodyArr[0];
+    const bodyExprResult = try vm.eval(bodyExpr, childEnv);
+    try std.testing.expectEqual(@as(i64, 42), bodyExprResult.value.number);
+    alloc.destroy(bodyExprResult);
+
+    childEnv.deinit();
+    alloc.destroy(childEnv);
+    childArena.deinit();
+    alloc.destroy(closure);
+    alloc.destroy(argVal);
+}
+
+
+test "closure — apply closure with computation" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("fn");
+    _ = try symtab.getOrPut("x");
+    _ = try symtab.getOrPut("+");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const fnSym = try symtab.getOrPut("fn");
+    const xSym = try symtab.getOrPut("x");
+    const plusSym = try symtab.getOrPut("+");
+
+    // (fn (x) (+ x x)) — double
+    const paramsList: []Expr = try alloc.dupe(Expr, &[1]Expr{ Expr{ .symbol = xSym } });
+    defer alloc.free(paramsList);
+
+    const bodyExpr: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = plusSym },
+        Expr{ .symbol = xSym },
+        Expr{ .symbol = xSym },
+    });
+    defer alloc.free(bodyExpr);
+
+    const fnItems: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = fnSym },
+        Expr{ .list = paramsList },
+        Expr{ .list = bodyExpr },
+    });
+    defer alloc.free(fnItems);
+
+    const closureObj = try vm.evalFn(fnItems, &env);
+    try std.testing.expectEqual(ObjType.closure, closureObj.type);
+
+    // Apply to 21: should return 42
+    const argsExpr: []Expr = try alloc.dupe(Expr, &[1]Expr{ Expr{ .number = 21 } });
+    defer alloc.free(argsExpr);
+    const result = try vm.applyClosure(closureObj.value.closure, argsExpr, &env);
+    try std.testing.expectEqual(@as(i64, 42), result.value.number);
+    alloc.destroy(result);
+    alloc.destroy(closureObj);
+}
 
 // ============================================================
 // Phase 6 Tests: if, cond, do
