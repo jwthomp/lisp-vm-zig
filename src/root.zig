@@ -490,6 +490,70 @@ pub const Vm = struct {
         return val;
     }
 
+    /// (do expr ...) — evaluate all, return last.
+    pub fn evalDo(self: *Vm, items: []Expr) !*LispObject {
+        const err = self._evalDo(items);
+        return err catch return err;
+    }
+
+    fn _evalDo(self: *Vm, items: []Expr) anyerror!*LispObject {
+        if (items.len < 2) {
+            const obj = try self.allocator.create(LispObject);
+            obj.* = LispObject.nilObj();
+            return obj;
+        }
+        var result: *LispObject = self.eval(items[1], self.rootEnv) catch return error.EvalDoFailed;
+        var i: usize = 2;
+        while (i < items.len) {
+            self.allocator.destroy(result);
+            result = self.eval(items[i], self.rootEnv) catch return error.EvalDoFailed;
+            i += 1;
+        }
+        return result;
+    }
+
+    /// (if test then else?) — conditional dispatch.
+    pub fn evalIf(self: *Vm, items: []Expr) !*LispObject {
+        return self._evalIf(items);
+    }
+
+    fn _evalIf(self: *Vm, items: []Expr) anyerror!*LispObject {
+        if (items.len < 3) return error.IfRequiresAtLeastTwoArgs;
+        const testVal = self.eval(items[1], self.rootEnv) catch return error.EvalIfFailed;
+        defer self.allocator.destroy(testVal);
+        if (testVal.type != .nil) {
+            if (items.len > 2) return self.eval(items[2], self.rootEnv) catch return error.EvalIfFailed;
+            const obj = try self.allocator.create(LispObject);
+            obj.* = LispObject.nilObj();
+            return obj;
+        } else {
+            if (items.len > 3) return self.eval(items[3], self.rootEnv) catch return error.EvalIfFailed;
+            const obj = try self.allocator.create(LispObject);
+            obj.* = LispObject.nilObj();
+            return obj;
+        }
+    }
+
+    /// (cond test-then test-then ...) — sequential matching.
+    pub fn evalCond(self: *Vm, items: []Expr) !*LispObject {
+        return self._evalCond(items);
+    }
+
+    fn _evalCond(self: *Vm, items: []Expr) anyerror!*LispObject {
+        var i: usize = 1;
+        while (i + 1 < items.len) {
+            const testVal = self.eval(items[i], self.rootEnv) catch return error.EvalCondFailed;
+            defer self.allocator.destroy(testVal);
+            if (testVal.type != .nil) {
+                return self.eval(items[i + 1], self.rootEnv) catch return error.EvalCondFailed;
+            }
+            i += 2;
+        }
+        const obj = try self.allocator.create(LispObject);
+        obj.* = LispObject.nilObj();
+        return obj;
+    }
+
     /// Full eval: atom, list (calls), special forms (def).
     pub fn eval(self: *Vm, expr: Expr, env: *Environment) !*LispObject {
         switch (expr) {
@@ -519,15 +583,25 @@ pub const Vm = struct {
                     return obj;
                 }
                 const head = items[0];
-                const isDef = switch (head) {
-                    .symbol => |s| blk: {
-                        const nm = s.name;
-                        if (nm.len < 3) break :blk false;
-                        break :blk (nm[0] == 'd' and nm[1] == 'e' and nm[2] == 'f');
-                    },
-                    else => false,
+                const headName = switch (head) {
+                    .symbol => |sym| sym.name,
+                    else => "",
                 };
+
+                // Strip trailing nulls for comparison
+                var clean: []const u8 = headName[0..];
+                while (clean.len > 0 and clean[clean.len - 1] == 0) clean = clean[0 .. clean.len - 1];
+
+                // Special forms
+                const isDef = clean.len >= 3 and clean[0] == 'd' and clean[1] == 'e' and clean[2] == 'f';
+                const isDo = clean.len >= 2 and clean[0] == 'd' and clean[1] == 'o';
+                const isIf = clean.len >= 2 and clean[0] == 'i' and clean[1] == 'f';
+                const isCond = clean.len >= 4 and clean[0] == 'c' and clean[1] == 'o' and clean[2] == 'n' and clean[3] == 'd';
+
                 if (isDef) return try self.evalDef(items);
+                if (isDo) return try self._evalDo(items);
+                if (isIf) return try self._evalIf(items);
+                if (isCond) return try self._evalCond(items);
 
                 // Push all args
                 var ai: usize = 1;
@@ -536,14 +610,6 @@ pub const Vm = struct {
                     self.push(arg);
                     ai += 1;
                 }
-                // Get head name
-                const headName = switch (head) {
-                    .symbol => |sym| sym.name,
-                    else => "",
-                };
-                // Strip trailing nulls
-                var clean: []const u8 = headName[0..];
-                while (clean.len > 0 and clean[clean.len - 1] == 0) clean = clean[0 .. clean.len - 1];
                 
                 if (clean.len >= 1 and clean[0] == '+') {
                     const b = self.pop() orelse return blk: {
@@ -1100,6 +1166,161 @@ test "primGt — 7 > 3 returns 1" {
     try std.testing.expectEqual(@as(i64, 1), result.?.value.number);
 }
 
+
+// ============================================================
+// Phase 6 Tests: if, cond, do
+// ============================================================
+
+test "eval — if with true branch" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("if");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const ifSym = try symtab.getOrPut("if");
+    const items: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = ifSym },
+        Expr{ .number = 1 },       // test (truthy)
+        Expr{ .number = 42 },       // then
+        Expr{ .number = 99 },       // else
+    });
+    defer alloc.free(items);
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    try std.testing.expectEqual(@as(i64, 42), result.value.number);
+    alloc.destroy(result);
+}
+
+test "eval — if with false branch" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("if");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const ifSym = try symtab.getOrPut("if");
+    const items: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = ifSym },
+        Expr{ .nil = {} },          // test (nil/falsy)
+        Expr{ .number = 42 },       // then
+        Expr{ .number = 99 },       // else
+    });
+    defer alloc.free(items);
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    try std.testing.expectEqual(@as(i64, 99), result.value.number);
+    alloc.destroy(result);
+}
+
+test "eval — if without else" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("if");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const ifSym = try symtab.getOrPut("if");
+    const items: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = ifSym },
+        Expr{ .nil = {} },          // test (nil)
+        Expr{ .number = 42 },       // then (not evaluated since test is nil)
+    });
+    defer alloc.free(items);
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    try std.testing.expectEqual(ObjType.nil, result.type);
+    alloc.destroy(result);
+}
+
+test "eval — do returns last value" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("do");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const doSym = try symtab.getOrPut("do");
+    const items: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = doSym },
+        Expr{ .number = 1 },
+        Expr{ .number = 2 },
+        Expr{ .number = 3 },
+    });
+    defer alloc.free(items);
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    try std.testing.expectEqual(@as(i64, 3), result.value.number);
+    alloc.destroy(result);
+}
+
+test "eval — cond first branch matches" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("cond");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const condSym = try symtab.getOrPut("cond");
+    const items: []Expr = try alloc.dupe(Expr, &[6]Expr{
+        Expr{ .symbol = condSym },
+        Expr{ .nil = {} },         // test 1: nil (skip)
+        Expr{ .number = 111 },     // then 1
+        Expr{ .number = 1 },       // test 2: truthy
+        Expr{ .number = 222 },     // then 2
+        Expr{ .number = 999 },     // then 3 (not reached)
+    });
+    defer alloc.free(items);
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    try std.testing.expectEqual(@as(i64, 222), result.value.number);
+    alloc.destroy(result);
+}
+
+test "eval — cond no branch matches returns nil" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("cond");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const condSym = try symtab.getOrPut("cond");
+    const items: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = condSym },
+        Expr{ .nil = {} },         // test 1: nil (skip)
+        Expr{ .number = 100 },     // then 1
+        Expr{ .nil = {} },         // test 2: nil (skip)
+    });
+    defer alloc.free(items);
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    try std.testing.expectEqual(ObjType.nil, result.type);
+    alloc.destroy(result);
+}
 
 // ============================================================
 // Phase 5 Tests: def, eval
