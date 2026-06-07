@@ -392,7 +392,7 @@ pub const Vm = struct {
         vm._registerBuiltin("assoc", .assoc);
         vm._registerBuiltin("map", .map);
         vm._registerBuiltin("filter", .filter);
-        vm._registerBuiltin("println", .println);
+                vm._registerBuiltin("println", .println);
 
         return vm;
     }
@@ -1734,6 +1734,7 @@ pub const Vm = struct {
                                 .map => try self.primMap(),
                                 .filter => try self.primFilter(),
                                 .println => try self.primPrintln(),
+
                             }
                             return self.pop() orelse {
                                 const obj = try self.allocator.create(LispObject);
