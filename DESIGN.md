@@ -720,7 +720,7 @@ builtin  → "#<builtin>"
 | **8** | Tail-call optimization (while-loop eval) | 1 | ✅ Done |
 | **9** | REPL, `print`, `cons`/`car`/`cdr` | 7 | ✅ Done |
 | **10**| `null?`/`symbol?`/`number?`/`list?` | 6 | ✅ Done |
-| **11**| `length`, `quote` | 3 | 🔲 |
+| **11**| `length`, `quote` | 6 | ✅ Done |
 
 ### Total: 54+ tests across 11 phases
 
