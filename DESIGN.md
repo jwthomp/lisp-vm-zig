@@ -723,6 +723,7 @@ builtin  → "#<builtin>"
 | **11**| `length`, `quote` | 6 | ✅ Done |
 | **12**| `defmacro`, macro expansion | 5 | ✅ Done |
 | **13**| `append`, `reverse`, `member`, `assoc`, `map`, `filter`, REPL | 12 | ✅ Done |
+| **14**| `let` bindings, sequential scoping | 4 | ✅ Done |
 
 ### Total: 54+ tests across 11 phases
 
@@ -828,7 +829,15 @@ pub const Vm = struct {
 
 ## Task Tracker
 
-### T1: Performance — Symbol-to-Dispatch Table (O(1) lookup)
+### T1: Performance — Symbol-to-Dispatch Table (O(1) lookup) ✅
+- **Status:** Complete
+- **Details:** Implemented `BuiltinKind` enum + `StringHashMap` dispatch table.
+
+### T2: Fix `let` Binding ✅
+- **Status:** Complete
+- **Details:** Implemented `_evalLet` with child arena, sequential scoping, shadowing.
+
+### T3: Additional Builtins
 - **Goal:** Replace character-by-character string comparison in eval dispatch with a `StringHashMap` that maps symbol names to dispatch functions.
 - **Details:** Current eval checks `clean[0]=='d' and clean[1]=='e'...` for every symbol lookup. Build a dispatch table at VM init that maps `"+"` → primAdd, `"defn"` → evalDefn, etc. All entries should use a common function pointer type wrapping `*Vm`.
 - **Tests:** Ensure all existing 74 tests still pass. Add a benchmark comparing old vs new dispatch.
