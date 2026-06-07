@@ -555,6 +555,312 @@ pub const Vm = struct {
         self.push(result);
     }
 
+    /// (append list1 list2 ...) — concatenate lists into a new list
+    pub fn primAppend(self: *Vm) !void {
+        const count = self.stack.items.len;
+        if (count == 0) return error.StackUnderflow;
+
+        // Create a shared nil object for all list terminators
+        const nil_obj = try self.allocator.create(LispObject);
+        nil_obj.* = LispObject.nilObj();
+
+        // Collect all list heads
+        var heads = try self.allocator.alloc(*LispObject, count);
+        defer self.allocator.free(heads);
+        var i: usize = 0;
+        var has_any_list = false;
+        while (i < count) : (i += 1) {
+            const obj = self.stack.items[i];
+            if (obj.type == .cons or obj.type == .nil) {
+                has_any_list = true;
+            }
+            heads[i] = obj;
+        }
+        if (!has_any_list) return error.TypeError;
+
+        // Build result by copying elements from all lists
+        var result: ?*LispObject = null;
+        var tail: ?*LispObject = null;
+
+        i = 0;
+        while (i < count) : (i += 1) {
+            var curr: *LispObject = heads[i];
+            while (curr.type == .cons) {
+                const car = curr.value.cons.car;
+                const cons_cell = try self.allocator.create(ConsCell);
+                cons_cell.* = ConsCell.init(car, nil_obj);
+                const new_obj = try self.allocator.create(LispObject);
+                new_obj.* = LispObject{
+                    .type = .cons,
+                    .value = .{ .cons = cons_cell },
+                    .next = null,
+                };
+                if (result == null) {
+                    result = new_obj;
+                } else {
+                    tail.?.value.cons.cdr = new_obj;
+                }
+                tail = new_obj;
+                curr = curr.value.cons.cdr;
+            }
+        }
+
+        if (result == null) {
+            self.push(nil_obj);
+        } else {
+            tail.?.value.cons.cdr = nil_obj;
+            self.push(result.?);
+        }
+    }
+
+    /// (reverse list) — return a new list with elements in reverse order
+    pub fn primReverse(self: *Vm) !void {
+        const obj = self.pop() orelse return error.StackUnderflow;
+        if (obj.type != .cons) return error.TypeError;
+
+        // Create a shared nil object for list terminators
+        const nil_obj = try self.allocator.create(LispObject);
+        nil_obj.* = LispObject.nilObj();
+
+        // Collect elements
+        var elements = std.ArrayList(*LispObject).initCapacity(self.allocator, 16) catch unreachable;
+        defer elements.deinit(self.allocator);
+        var curr: *LispObject = obj;
+        while (curr.type == .cons) {
+            elements.appendAssumeCapacity(curr.value.cons.car);
+            curr = curr.value.cons.cdr;
+        }
+
+        // Build reversed list by appending to front
+        var result: ?*LispObject = null;
+        var i: usize = elements.items.len;
+        while (i > 0) {
+            i -= 1;
+            const cons_cell = try self.allocator.create(ConsCell);
+            cons_cell.* = ConsCell.init(elements.items[i], nil_obj);
+            const new_obj = try self.allocator.create(LispObject);
+            new_obj.* = LispObject{
+                .type = .cons,
+                .value = .{ .cons = cons_cell },
+                .next = null,
+            };
+            if (result == null) {
+                result = new_obj;
+            } else {
+                // Find tail
+                var tail_ptr: ?*LispObject = result;
+                while (tail_ptr.?.type == .cons and tail_ptr.?.value.cons.cdr != nil_obj) {
+                    tail_ptr = tail_ptr.?.value.cons.cdr;
+                }
+                tail_ptr.?.value.cons.cdr = new_obj;
+            }
+        }
+
+        if (result == null) {
+            self.push(nil_obj);
+        } else {
+            var tail_ptr: ?*LispObject = result;
+            while (tail_ptr.?.type == .cons and tail_ptr.?.value.cons.cdr != nil_obj) {
+                tail_ptr = tail_ptr.?.value.cons.cdr;
+            }
+            if (tail_ptr != null and tail_ptr.?.type == .cons) {
+                tail_ptr.?.value.cons.cdr = nil_obj;
+            }
+            self.push(result.?);
+        }
+    }
+
+    /// (member x list) — check if x is an element of list, return sublist or nil
+    pub fn primMember(self: *Vm) !void {
+        const list_obj = self.pop() orelse return error.StackUnderflow;
+        const x = self.pop() orelse return error.StackUnderflow;
+        if (list_obj.type != .cons and list_obj.type != .nil) return error.TypeError;
+
+        var curr: *LispObject = list_obj;
+        while (curr.type == .cons) {
+            const car = curr.value.cons.car;
+            if (car.type == x.type) {
+                switch (x.type) {
+                    .number => if (car.value.number == x.value.number) break,
+                    .nil => break,
+                    .symbol => if (std.mem.eql(u8, car.value.symbol.name[0 .. car.value.symbol.name.len - 1], x.value.symbol.name[0 .. x.value.symbol.name.len - 1])) break,
+                    else => {},
+                }
+            }
+            curr = curr.value.cons.cdr;
+        }
+
+        if (curr.type == .cons) {
+            self.push(curr);
+        } else {
+            const nil_obj = try self.allocator.create(LispObject);
+            nil_obj.* = LispObject.nilObj();
+            self.push(nil_obj);
+        }
+    }
+
+    /// (assoc key alist) — look up key in association list, return value or nil
+    pub fn primAssoc(self: *Vm) !void {
+        const alist_obj = self.pop() orelse return error.StackUnderflow;
+        const key = self.pop() orelse return error.StackUnderflow;
+        if (alist_obj.type != .cons and alist_obj.type != .nil) return error.TypeError;
+
+        var curr: *LispObject = alist_obj;
+        while (curr.type == .cons) {
+            const car = curr.value.cons.car;
+            if (car.type == .cons) {
+                const pair_key = car.value.cons.car;
+                if (pair_key.type == key.type) {
+                    var matched: bool = false;
+                    switch (key.type) {
+                        .number => matched = pair_key.value.number == key.value.number,
+                        .nil => matched = true,
+                        .symbol => matched = std.mem.eql(u8, pair_key.value.symbol.name[0 .. pair_key.value.symbol.name.len - 1], key.value.symbol.name[0 .. key.value.symbol.name.len - 1]),
+                        else => {},
+                    }
+                    if (matched) {
+                        self.push(car.value.cons.cdr);
+                        return;
+                    }
+                }
+            }
+            curr = curr.value.cons.cdr;
+        }
+
+        const nil_obj = try self.allocator.create(LispObject);
+        nil_obj.* = LispObject.nilObj();
+        self.push(nil_obj);
+    }
+
+    /// (map fn list) — apply fn to each element, return list of results
+    pub fn primMap(self: *Vm) !void {
+        const list_obj = self.pop() orelse return error.StackUnderflow;
+        const fn_obj = self.pop() orelse return error.StackUnderflow;
+        if (list_obj.type != .cons and list_obj.type != .nil) return error.TypeError;
+        if (fn_obj.type != .closure and fn_obj.type != .builtin) return error.TypeError;
+
+        // Create a shared nil object
+        const nil_obj = try self.allocator.create(LispObject);
+        nil_obj.* = LispObject.nilObj();
+
+        var result: ?*LispObject = null;
+        var tail: ?*LispObject = null;
+        var curr: *LispObject = list_obj;
+
+        while (curr.type == .cons) {
+            self.push(curr.value.cons.car);
+            var applied: ?*LispObject = null;
+            switch (fn_obj.value) {
+                .closure => |cl| {
+                    // Convert LispObject to Expr for the closure arg
+                    const elem = curr.value.cons.car;
+                    const argExpr: Expr = switch (elem.type) {
+                        .number => Expr{.number = elem.value.number},
+                        .nil => Expr{.nil = {}},
+                        .symbol => Expr{.symbol = elem.value.symbol},
+                        else => Expr{.nil = {}},
+                    };
+                    const args_expr = try self.allocator.alloc(Expr, 1);
+                    args_expr[0] = argExpr;
+                    applied = try self.applyClosure(cl, args_expr, self.rootEnv);
+                    self.allocator.free(args_expr);
+                },
+                .builtin => {
+                    const result_obj = try self.allocator.create(LispObject);
+                    result_obj.* = LispObject.nilObj();
+                    applied = result_obj;
+                },
+                else => {},
+            }
+
+            const cons_cell = try self.allocator.create(ConsCell);
+            cons_cell.* = ConsCell.init(applied.?, nil_obj);
+            const new_obj = try self.allocator.create(LispObject);
+            new_obj.* = LispObject{
+                .type = .cons,
+                .value = .{ .cons = cons_cell },
+                .next = null,
+            };
+            if (result == null) {
+                result = new_obj;
+            } else {
+                tail.?.value.cons.cdr = new_obj;
+            }
+            tail = new_obj;
+            curr = curr.value.cons.cdr;
+        }
+
+        if (result == null) {
+            self.push(nil_obj);
+        } else {
+            tail.?.value.cons.cdr = nil_obj;
+            self.push(result.?);
+        }
+    }
+
+    /// (filter pred list) — keep elements where pred returns true
+    pub fn primFilter(self: *Vm) !void {
+        const list_obj = self.pop() orelse return error.StackUnderflow;
+        const pred_obj = self.pop() orelse return error.StackUnderflow;
+        if (list_obj.type != .cons and list_obj.type != .nil) return error.TypeError;
+        if (pred_obj.type != .closure and pred_obj.type != .builtin) return error.TypeError;
+
+        // Create a shared nil object
+        const nil_obj = try self.allocator.create(LispObject);
+        nil_obj.* = LispObject.nilObj();
+
+        var result: ?*LispObject = null;
+        var tail: ?*LispObject = null;
+        var curr: *LispObject = list_obj;
+
+        while (curr.type == .cons) {
+            self.push(curr.value.cons.car);
+            var pred_result: ?*LispObject = null;
+            switch (pred_obj.value) {
+                .closure => |cl| {
+                    // Convert LispObject to Expr for the closure arg
+                    const elem = curr.value.cons.car;
+                    const argExpr: Expr = switch (elem.type) {
+                        .number => Expr{.number = elem.value.number},
+                        .nil => Expr{.nil = {}},
+                        .symbol => Expr{.symbol = elem.value.symbol},
+                        else => Expr{.nil = {}},
+                    };
+                    const args_expr = try self.allocator.alloc(Expr, 1);
+                    args_expr[0] = argExpr;
+                    pred_result = try self.applyClosure(cl, args_expr, self.rootEnv);
+                    self.allocator.free(args_expr);
+                },
+                else => {},
+            }
+
+            if (pred_result != null and pred_result.?.type != .nil) {
+                const cons_cell = try self.allocator.create(ConsCell);
+                cons_cell.* = ConsCell.init(curr.value.cons.car, nil_obj);
+                const new_obj = try self.allocator.create(LispObject);
+                new_obj.* = LispObject{
+                    .type = .cons,
+                    .value = .{ .cons = cons_cell },
+                    .next = null,
+                };
+                if (result == null) {
+                    result = new_obj;
+                } else {
+                    tail.?.value.cons.cdr = new_obj;
+                }
+                tail = new_obj;
+            }
+            curr = curr.value.cons.cdr;
+        }
+
+        if (result == null) {
+            self.push(nil_obj);
+        } else {
+            tail.?.value.cons.cdr = nil_obj;
+            self.push(result.?);
+        }
+    }
+
     /// Format a LispObject as a readable string.
     fn formatLispObject(self: *Vm, obj: *LispObject) ![]u8 {
         var buf = try self.allocator.alloc(u8, 512);
@@ -922,6 +1228,7 @@ pub const Vm = struct {
 
     /// (defn name (params...) body...) — sugar for (def name (fn params body...)).
     pub fn evalDefn(self: *Vm, items: []Expr, env: *Environment) !*LispObject {
+
         if (items.len < 4) return error.DefnRequiresNameParamsAndBody;
 
         // Extract params list and body: items = [defn, name, params_list, body1, body2, ...]
@@ -1166,7 +1473,7 @@ pub const Vm = struct {
 
                     // --- Special forms ---
                     const isDef = clean.len == 3 and clean[0] == 'd' and clean[1] == 'e' and clean[2] == 'f';
-                    const isDefn = clean.len >= 5 and clean[0] == 'd' and clean[1] == 'e' and clean[2] == 'f' and clean[3] == 'n';
+                    const isDefn = clean.len >= 4 and clean[0] == 'd' and clean[1] == 'e' and clean[2] == 'f' and clean[3] == 'n';
                     const isDo = clean.len >= 2 and clean[0] == 'd' and clean[1] == 'o';
                     const isFn = clean.len >= 2 and clean[0] == 'f' and clean[1] == 'n';
                     const isIf = clean.len >= 2 and clean[0] == 'i' and clean[1] == 'f';
@@ -1364,6 +1671,66 @@ pub const Vm = struct {
                             return obj;
                         };
                     }
+                    if (std.mem.eql(u8, clean, "append")) {
+                        try self.callPrim("append");
+                        return self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
+                    }
+                    if (std.mem.eql(u8, clean, "reverse")) {
+                        try self.callPrim("reverse");
+                        return self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
+                    }
+                    if (std.mem.eql(u8, clean, "member")) {
+                        try self.callPrim("member");
+                        return self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
+                    }
+                    if (std.mem.eql(u8, clean, "assoc")) {
+                        try self.callPrim("assoc");
+                        return self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
+                    }
+                    // --- map fn list / filter pred list — handle before unknown function ---
+                    if (std.mem.eql(u8, clean, "map")) {
+                        // Push all args for eval
+                        var ai_map: usize = 1;
+                        while (ai_map < items.len) : (ai_map += 1) {
+                            const arg = try self.eval(items[ai_map], env);
+                            self.push(arg);
+                        }
+                        try self.primMap();
+                        return self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
+                    }
+                    if (std.mem.eql(u8, clean, "filter")) {
+                        var ai_flt: usize = 1;
+                        while (ai_flt < items.len) : (ai_flt += 1) {
+                            const arg = try self.eval(items[ai_flt], env);
+                            self.push(arg);
+                        }
+                        try self.primFilter();
+                        return self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
+                    }
 
                     // Unknown function — pop args that were pushed
                     ai = 1;
@@ -1397,6 +1764,10 @@ pub const Vm = struct {
         if (std.mem.eql(u8, name, "number?")) return try self.primNumberQ();
         if (std.mem.eql(u8, name, "list?")) return try self.primListQ();
         if (std.mem.eql(u8, name, "length")) return try self.primLength();
+        if (std.mem.eql(u8, name, "append")) return try self.primAppend();
+        if (std.mem.eql(u8, name, "reverse")) return try self.primReverse();
+        if (std.mem.eql(u8, name, "member")) return try self.primMember();
+        if (std.mem.eql(u8, name, "assoc")) return try self.primAssoc();
         return error.UnknownPrimitive;
     }
 };
@@ -3089,32 +3460,517 @@ test "REPL — processes input lines in a loop" {
     try std.testing.expectEqual(50, count);
 }
 
-pub fn main() void {
-    const input = "(+ 1 2 3)";
-    std.debug.print("Input: {s}\n", .{input});
 
-    var lexer = Lexer.init(input);
-    var tok_buf: [128]Token = undefined;
-    var tok_count: usize = 0;
-    while (tok_count < tok_buf.len) {
-        const tok = lexer.nextToken() orelse break;
-        if (tok == .eof) break;
-        tok_buf[tok_count] = tok;
-        tok_count += 1;
+// ============================================================
+// Phase 13 Tests: New Builtins
+// ============================================================
+
+test "primAppend — appends two lists" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    _ = try symtab.getOrPut("append");
+
+    // (append (cons 1 nil) (cons 2 nil))
+    const list1: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 1 },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(list1);
+
+    const list2: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 2 },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(list2);
+
+    const callItems: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("append") },
+        Expr{ .list = list1 },
+        Expr{ .list = list2 },
+    });
+    defer alloc.free(callItems);
+
+    const result = try vm.eval(Expr{ .list = callItems }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(ObjType.cons, result.type);
+}
+
+test "primReverse — reverses a list" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    _ = try symtab.getOrPut("reverse");
+
+    // (reverse (cons 1 (cons 2 (cons 3 nil))))
+    const l3: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 3 },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(l3);
+
+    const l2: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 2 },
+        Expr{ .list = l3 },
+    });
+    defer alloc.free(l2);
+
+    const l1: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 1 },
+        Expr{ .list = l2 },
+    });
+    defer alloc.free(l1);
+
+    const callItems: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("reverse") },
+        Expr{ .list = l1 },
+    });
+    defer alloc.free(callItems);
+
+    const result = try vm.eval(Expr{ .list = callItems }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(ObjType.cons, result.type);
+}
+
+test "primMember — finds element in list" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    _ = try symtab.getOrPut("member");
+
+    // (member 2 (cons 1 (cons 2 (cons 3 nil))))
+    const l3: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 3 },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(l3);
+
+    const l2: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 2 },
+        Expr{ .list = l3 },
+    });
+    defer alloc.free(l2);
+
+    const list: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 1 },
+        Expr{ .list = l2 },
+    });
+    defer alloc.free(list);
+
+    const callItems: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("member") },
+        Expr{ .number = 2 },
+        Expr{ .list = list },
+    });
+    defer alloc.free(callItems);
+
+    const result = try vm.eval(Expr{ .list = callItems }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(ObjType.cons, result.type);
+}
+
+test "primAssoc — looks up in association list" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    _ = try symtab.getOrPut("assoc");
+
+    // (assoc 1 (cons (cons 1 20) nil))
+    const pair: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 1 },
+        Expr{ .number = 20 },
+    });
+    defer alloc.free(pair);
+
+    const alist: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .list = pair },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(alist);
+
+    const callItems: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("assoc") },
+        Expr{ .number = 1 },
+        Expr{ .list = alist },
+    });
+    defer alloc.free(callItems);
+
+    const result = try vm.eval(Expr{ .list = callItems }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(ObjType.number, result.type);
+    try std.testing.expectEqual(@as(i64, 20), result.value.number);
+}
+
+
+test "primMap — applies function to list" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    _ = try symtab.getOrPut("map");
+
+    // Create function: (defn double-fn (x) (* x 2))
+    const fnParams: []Expr = try alloc.dupe(Expr, &[1]Expr{
+        Expr{ .symbol = try symtab.getOrPut("x") },
+    });
+    defer alloc.free(fnParams);
+
+    const fnBody: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("*") },
+        Expr{ .symbol = try symtab.getOrPut("x") },
+        Expr{ .number = 2 },
+    });
+    defer alloc.free(fnBody);
+
+    const defnItems: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = try symtab.getOrPut("double-fn") },
+        Expr{ .list = fnParams },
+        Expr{ .list = fnBody },
+    });
+    defer alloc.free(defnItems);
+
+    _ = try vm.eval(Expr{ .list = defnItems }, &env);
+
+    // Now: (map double-fn (cons 1 (cons 2 nil)))
+    // Build (cons 2 nil) first
+    const l2: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 2 },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(l2);
+
+    // Build (cons 1 l2)
+    const l1: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 1 },
+        Expr{ .list = l2 },
+    });
+    defer alloc.free(l1);
+
+    const callItems: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("map") },
+        Expr{ .symbol = try symtab.getOrPut("double-fn") },
+        Expr{ .list = l1 },
+    });
+    defer alloc.free(callItems);
+
+    const result = try vm.eval(Expr{ .list = callItems }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(ObjType.cons, result.type);
+}
+
+test "primFilter — filters list by predicate" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    _ = try symtab.getOrPut("filter");
+
+    // Create function: (defn is-two (x) (= x 2))
+    const fnParams: []Expr = try alloc.dupe(Expr, &[1]Expr{
+        Expr{ .symbol = try symtab.getOrPut("x") },
+    });
+    defer alloc.free(fnParams);
+
+    const fnBody: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("=") },
+        Expr{ .symbol = try symtab.getOrPut("x") },
+        Expr{ .number = 2 },
+    });
+    defer alloc.free(fnBody);
+
+    const defnItems: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = try symtab.getOrPut("is-two") },
+        Expr{ .list = fnParams },
+        Expr{ .list = fnBody },
+    });
+    defer alloc.free(defnItems);
+
+    _ = try vm.eval(Expr{ .list = defnItems }, &env);
+
+    // Now: (filter is-two (cons 1 (cons 2 (cons 3 nil))))
+    const l3: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 3 },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(l3);
+
+    const l2: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 2 },
+        Expr{ .list = l3 },
+    });
+    defer alloc.free(l2);
+
+    const l1: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 1 },
+        Expr{ .list = l2 },
+    });
+    defer alloc.free(l1);
+
+    const callItems: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("filter") },
+        Expr{ .symbol = try symtab.getOrPut("is-two") },
+        Expr{ .list = l1 },
+    });
+    defer alloc.free(callItems);
+
+    const result = try vm.eval(Expr{ .list = callItems }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(ObjType.cons, result.type);
+}
+
+
+
+/// REPL with history, arrow key navigation, and macro support
+fn replMain(self: *Vm, alloc: std.heap.PageAllocator) anyerror!void {
+    const stdin = std.io.getStdIn();
+    const stdout = std.io.getStdOut();
+    var history = std.ArrayList([]u8).init(alloc);
+    defer {
+        var i: usize = 0;
+        while (i < history.items.len) : (i += 1) {
+            alloc.free(history.items[i]);
+        }
+        history.deinit();
     }
-    const tokens = tok_buf[0..tok_count];
-    std.debug.print("Tokens: {} items\n", .{tok_count});
+    var histIdx: usize = 0;
+    var maxHistIdx: usize = 0;
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+
+    var buf = try alloc.alloc(u8, 256);
+    errdefer alloc.free(buf);
+    var bufLen: usize = 0;
+    var pos: usize = 0;
+    var cursor: usize = 0;
+
+    while (true) {
+        // Prompt
+        try stdout.writeAll("> ");
+        try stdout.flush();
+
+        // Read input line
+        bufLen = 0;
+        pos = 0;
+        cursor = 0;
+        buf[0] = 0;
+        while (true) {
+            var ch: u8 = 0;
+            _ = try stdin.readAll(&ch);
+
+            if (ch == 3) { // Ctrl+C
+                try stdout.writeAll("^C\n");
+                break;
+            }
+            if (ch == 127 or ch == 8) { // Backspace / Ctrl+H
+                if (pos > 0) {
+                    pos -= 1;
+                    if (pos < cursor) cursor = pos;
+                    // Move remaining chars
+                    if (pos < bufLen) {
+                        var i: usize = pos;
+                        while (i < bufLen) : (i += 1) {
+                            buf[i] = buf[i + 1];
+                        }
+                    }
+                    bufLen -= 1;
+                    buf[bufLen] = 0;
+                    try stdout.writeAll("\x1b[1D \x1b[1D");
+                }
+            } else if (ch == 27) { // Escape — check for arrow keys
+                var seq: [3]u8 = undefined;
+                _ = try stdin.readAll(&seq);
+                if (seq[0] == 91) { // CSI
+                    switch (seq[1]) {
+                        65 => { // Up arrow
+                            if (histIdx > 0) {
+                                histIdx -= 1;
+                                const line = history.items[histIdx];
+                                for (buf, 0..) |_, i| {
+                                    if (i >= line.len) break;
+                                    buf[i] = line[i];
+                                }
+                                bufLen = line.len;
+                                buf[bufLen] = 0;
+                                pos = bufLen;
+                                cursor = bufLen;
+                                try stdout.writeAll("\x1b[2K\r> ");
+                                try stdout.writeAll(buf[0..cursor]);
+                            }
+                        },
+                        66 => { // Down arrow
+                            if (histIdx < history.items.len) {
+                                histIdx += 1;
+                                if (histIdx < history.items.len) {
+                                    const line = history.items[histIdx];
+                                    for (buf, 0..) |_, i| {
+                                        if (i >= line.len) break;
+                                        buf[i] = line[i];
+                                    }
+                                    bufLen = line.len;
+                                    buf[bufLen] = 0;
+                                    pos = bufLen;
+                                    cursor = bufLen;
+                                    try stdout.writeAll("\x1b[2K\r> ");
+                                    try stdout.writeAll(buf[0..cursor]);
+                                } else {
+                                    for (buf, 0..) |_, i| {
+                                        if (i < bufLen) buf[i] = 0;
+                                    }
+                                    bufLen = 0;
+                                    pos = 0;
+                                    cursor = 0;
+                                    try stdout.writeAll("\x1b[2K\r> ");
+                                }
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            } else if (ch == 10 or ch == 13) { // Enter
+                try stdout.writeAll("\n");
+                break;
+            } else if (ch >= 32 and ch < 127) { // Printable
+                if (bufLen < buf.len - 1) {
+                    if (pos < bufLen) {
+                        // Insert in middle
+                        var i: usize = bufLen;
+                        while (i > pos) : (i -= 1) {
+                            buf[i] = buf[i - 1];
+                        }
+                    }
+                    buf[pos] = ch;
+                    pos += 1;
+                    bufLen += 1;
+                    cursor = pos;
+                    buf[bufLen] = 0;
+                    try stdout.writeAll(&buf[pos - pos..pos]);
+                    if (pos < bufLen) {
+                        try stdout.writeAll(buf[pos..bufLen]);
+                        for (0..bufLen - pos) |_| {
+                            try stdout.writeAll("\x1b[1D");
+                        }
+                    }
+                }
+            }
+        }
+        if (buf[0] == 0) continue;
+
+        const input_line = buf[0..bufLen];
+
+        // Add to history
+        const histEntry = try alloc.dupe(u8, input_line);
+        history.appendAssumeCapacity(histEntry);
+        histIdx = history.items.len;
+        maxHistIdx = history.items.len;
+
+        // Tokenize
+        var lexer = Lexer.init(input_line);
+        var local_tok_buf: [256]Token = undefined;
+        var tok_count: usize = 0;
+        while (tok_count < local_tok_buf.len) {
+            const tok = lexer.nextToken() orelse break;
+            if (tok == .eof) break;
+            local_tok_buf[tok_count] = tok;
+            tok_count += 1;
+        }
+        const tokens = local_tok_buf[0..tok_count];
+
+        // Reset arena for each line
+        arena = std.heap.ArenaAllocator.init(alloc);
+        symtab = SymbolTable.init(alloc, &arena);
+
+        // Parse
+        var parser = Parser.init(tokens, &arena, &symtab);
+        const ast = try parser.parse();
+
+        // Eval
+        const result = try self.eval(ast, self.rootEnv);
+        errdefer alloc.destroy(result);
+
+        // Print
+        if (result.type == .closure) {
+            // Check if it's a macro
+            if (result.value.closure.is_macro) {
+                try stdout.writeAll("#<macro>\n");
+            } else {
+                try stdout.writeAll("#<closure>\n");
+            }
+        } else {
+            self.printValue(result);
+        }
+        try stdout.flush();
+        alloc.destroy(result);
+    }
+}
+
+pub fn main() void {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
 
-    var symtab = SymbolTable.init(std.heap.page_allocator, &arena);
+    var symtab = SymbolTable.init(alloc, &arena);
     defer symtab.deinit();
 
-    var parser = Parser.init(tokens, &arena, &symtab);
-    _ = parser.parse() catch {
-        std.debug.print("Parse failed\n", .{});
-        return;
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    replMain(&vm, alloc) catch |err| {
+        std.debug.print("REPL error: {any}\n", .{err});
     };
-    std.debug.print("Parsed successfully\n", .{});
 }

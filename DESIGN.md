@@ -721,6 +721,7 @@ builtin  → "#<builtin>"
 | **9** | REPL, `print`, `cons`/`car`/`cdr` | 7 | ✅ Done |
 | **10**| `null?`/`symbol?`/`number?`/`list?` | 6 | ✅ Done |
 | **11**| `length`, `quote` | 6 | ✅ Done |
+| **12**| `defmacro`, macro expansion | 5 | ✅ Done |
 
 ### Total: 54+ tests across 11 phases
 
