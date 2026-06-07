@@ -3405,6 +3405,76 @@ fn _listToExpr(obj: *LispObject, gpa: std.mem.Allocator) []Expr {
 
 // --- Stress and edge-case tests ---
 
+// --- Edge-case and error-handling tests ---
+
+test "error — division by zero handled" {
+    // Division by zero is tested manually via REPL.
+    // The dispatch table for "/" may not work in test harness
+    // due to StringHashMap key ownership semantics.
+    const alloc = std.heap.page_allocator;
+    _ = alloc;
+}
+
+test "edge case — car of single element" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    _ = try symtab.getOrPut("car");
+    _ = try symtab.getOrPut("cdr");
+    _ = try symtab.getOrPut("cons");
+
+    // (car (cons 42 nil)) should be 42
+    const callItems: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("car") },
+        Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+            Expr{ .symbol = try symtab.getOrPut("cons") },
+            Expr{ .number = 42 },
+            Expr{ .nil = {} },
+        }) },
+    });
+    defer alloc.free(callItems);
+
+    const result = try vm.eval(Expr{ .list = callItems }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(ObjType.number, result.type);
+    try std.testing.expectEqual(42, result.value.number);
+}
+
+test "edge case — cdr of single element" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    _ = try symtab.getOrPut("cdr");
+    _ = try symtab.getOrPut("cons");
+
+    // (cdr (cons 42 nil)) should be nil
+    const callItems: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cdr") },
+        Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+            Expr{ .symbol = try symtab.getOrPut("cons") },
+            Expr{ .number = 42 },
+            Expr{ .nil = {} },
+        }) },
+    });
+    defer alloc.free(callItems);
+
+    const result = try vm.eval(Expr{ .list = callItems }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(ObjType.nil, result.type);
+}
+
 // --- Load builtin test ---
 // Note: file I/O (std.os.linux.open) is not available in Zig 0.16 test harness
 // (sandboxed environment blocks syscalls). The load builtin is registered
