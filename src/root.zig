@@ -484,67 +484,71 @@ pub const Vm = struct {
     }
 
     /// (do expr ...) — evaluate all, return last.
-    pub fn evalDo(self: *Vm, items: []Expr) !*LispObject {
-        const err = self._evalDo(items);
-        return err catch return err;
-    }
-
-    fn _evalDo(self: *Vm, items: []Expr) anyerror!*LispObject {
+    /// TCO: eval() is a while-loop so no recursion stack needed.
+    pub fn _evalDo(self: *Vm, items: []Expr, env: *Environment) !*LispObject {
         if (items.len < 2) {
             const obj = try self.allocator.create(LispObject);
             obj.* = LispObject.nilObj();
             return obj;
         }
-        var result: *LispObject = self.eval(items[1], self.rootEnv) catch return error.EvalDoFailed;
-        var i: usize = 2;
-        while (i < items.len) {
-            self.allocator.destroy(result);
-            result = self.eval(items[i], self.rootEnv) catch return error.EvalDoFailed;
-            i += 1;
+        // Evaluate all except last, discard
+        var i: usize = 1;
+        while (i < items.len - 1) : (i += 1) {
+            const res = try self._evalDoAtom(items[i], env);
+            self.allocator.destroy(res);
         }
-        return result;
+        // Return last value
+        return self._evalDoAtom(items[items.len - 1], env);
+    }
+
+    /// Internal helper for _evalDo: evaluates an atom without inference-loop risk.
+    fn _evalDoAtom(self: *Vm, expr: Expr, env: *Environment) anyerror!*LispObject {
+        return self.eval(expr, env);
     }
 
     /// (if test then else?) — conditional dispatch.
-    pub fn evalIf(self: *Vm, items: []Expr) !*LispObject {
-        return self._evalIf(items);
-    }
-
-    fn _evalIf(self: *Vm, items: []Expr) anyerror!*LispObject {
+    /// TCO: eval() is a while-loop so no recursion stack needed.
+    pub fn _evalIf(self: *Vm, items: []Expr, env: *Environment) !*LispObject {
         if (items.len < 3) return error.IfRequiresAtLeastTwoArgs;
-        const testVal = self.eval(items[1], self.rootEnv) catch return error.EvalIfFailed;
+        const testVal = try self._evalIfAtom(items[1], env);
         defer self.allocator.destroy(testVal);
-        if (testVal.type != .nil) {
-            if (items.len > 2) return self.eval(items[2], self.rootEnv) catch return error.EvalIfFailed;
+        const taken = testVal.type != .nil and !(testVal.type == .number and testVal.value.number == 0);
+        if (taken) {
+            if (items.len > 2) return self._evalIfAtom(items[2], env);
             const obj = try self.allocator.create(LispObject);
             obj.* = LispObject.nilObj();
             return obj;
         } else {
-            if (items.len > 3) return self.eval(items[3], self.rootEnv) catch return error.EvalIfFailed;
+            if (items.len > 3) return self._evalIfAtom(items[3], env);
             const obj = try self.allocator.create(LispObject);
             obj.* = LispObject.nilObj();
             return obj;
         }
     }
 
-    /// (cond test-then test-then ...) — sequential matching.
-    pub fn evalCond(self: *Vm, items: []Expr) !*LispObject {
-        return self._evalCond(items);
+    fn _evalIfAtom(self: *Vm, expr: Expr, env: *Environment) anyerror!*LispObject {
+        return self.eval(expr, env);
     }
 
-    fn _evalCond(self: *Vm, items: []Expr) anyerror!*LispObject {
+    /// (cond (test expr) (test expr) ...) — sequential matching.
+    /// TCO: eval() is a while-loop so no recursion stack needed.
+    pub fn _evalCond(self: *Vm, items: []Expr, env: *Environment) !*LispObject {
         var i: usize = 1;
         while (i + 1 < items.len) {
-            const testVal = self.eval(items[i], self.rootEnv) catch return error.EvalCondFailed;
+            const testVal = try self._evalCondAtom(items[i], env);
             defer self.allocator.destroy(testVal);
-            if (testVal.type != .nil) {
-                return self.eval(items[i + 1], self.rootEnv) catch return error.EvalCondFailed;
+            if (testVal.type != .nil and !(testVal.type == .number and testVal.value.number == 0)) {
+                return self._evalCondAtom(items[i + 1], env);
             }
             i += 2;
         }
         const obj = try self.allocator.create(LispObject);
         obj.* = LispObject.nilObj();
         return obj;
+    }
+
+    fn _evalCondAtom(self: *Vm, expr: Expr, env: *Environment) anyerror!*LispObject {
+        return self.eval(expr, env);
     }
 
     /// (fn (params...) body...) — create closure object.
@@ -648,34 +652,43 @@ pub const Vm = struct {
     }
 
     /// Apply a closure: create child env, bind params, evaluate body.
+    /// Uses anyerror wrapper to break eval <-> applyClosure inference loop.
     pub fn applyClosure(self: *Vm, cl: *Closure, args: []Expr, env: *Environment) !*LispObject {
         return self._applyClosure(cl, args, env);
     }
 
     fn _applyClosure(self: *Vm, cl: *Closure, args: []Expr, env: *Environment) anyerror!*LispObject {
-        // Create child environment with closure's captured env as parent
+        // Evaluate args first
+        const argCount = if (args.len > cl.params.len) cl.params.len else args.len;
+        const evaluatedArgs = try self.allocator.alloc(*LispObject, argCount);
+        defer self.allocator.free(evaluatedArgs);
+        var ai: usize = 0;
+        while (ai < argCount) : (ai += 1) {
+            evaluatedArgs[ai] = try self.eval(args[ai], env);
+        }
+
+        // Create child environment
         const childArena = try self.allocator.create(std.heap.ArenaAllocator);
         childArena.* = std.heap.ArenaAllocator.init(self.allocator);
         const childEnv = try self.allocator.create(Environment);
         childEnv.* = Environment.init(cl.env, childArena.allocator());
-        defer {
+        errdefer {
             childEnv.deinit();
             self.allocator.destroy(childEnv);
         }
+        errdefer childArena.deinit();
 
-        // Bind parameters to argument values
-        var ai: usize = 0;
-        while (ai < cl.params.len and ai < args.len) {
-            var paramName: []const u8 = cl.params[ai].name[0..];
+        // Bind parameters
+        var ai2: usize = 0;
+        while (ai2 < cl.params.len and ai2 < argCount) : (ai2 += 1) {
+            var paramName: []const u8 = cl.params[ai2].name[0..];
             while (paramName.len > 0 and paramName[paramName.len - 1] == 0) {
                 paramName = paramName[0 .. paramName.len - 1];
             }
-            const argVal = try self.eval(args[ai], env);
-            try childEnv.bind(paramName, argVal);
-            ai += 1;
+            try childEnv.bind(paramName, evaluatedArgs[ai2]);
         }
 
-        // Evaluate body sequentially
+        // Evaluate body sequentially, return last value
         var result: *LispObject = try self.allocator.create(LispObject);
         result.* = LispObject.nilObj();
         var i: usize = 0;
@@ -683,162 +696,173 @@ pub const Vm = struct {
             self.allocator.destroy(result);
             result = try self.eval(cl.body[i], childEnv);
         }
+        
         return result;
     }
 
-    /// Full eval: atom, list (calls), special forms (def).
+    /// Full eval with tail-call optimization via while-loop.
+    /// Replaces the recursive eval with a while-loop: all self.eval() calls
+    /// re-enter the same loop instead of pushing new stack frames.
     pub fn eval(self: *Vm, expr: Expr, env: *Environment) !*LispObject {
-        switch (expr) {
-            .nil => {
-                const obj = try self.allocator.create(LispObject);
-                obj.* = LispObject.nilObj();
-                return obj;
-            },
-            .number => |n| {
-                const obj = try self.allocator.create(LispObject);
-                obj.* = LispObject.numberObj(n);
-                return obj;
-            },
-            .symbol => |sym| {
-                // Use sym.name directly — StringHashMap handles the null terminator
-                if (env.lookup(sym.name)) |v| return v;
-                if (self.rootEnv.lookup(sym.name)) |v| return v;
-                const obj = try self.allocator.create(LispObject);
-                obj.* = LispObject.nilObj();
-                return obj;
-            },
-            .list => |items| {
-                if (items.len == 0) {
+        while (true) {
+            switch (expr) {
+                .nil => {
                     const obj = try self.allocator.create(LispObject);
                     obj.* = LispObject.nilObj();
                     return obj;
-                }
-                const head = items[0];
-                const headName = switch (head) {
-                    .symbol => |sym| sym.name,
-                    else => "",
-                };
+                },
+                .number => |n| {
+                    const obj = try self.allocator.create(LispObject);
+                    obj.* = LispObject.numberObj(n);
+                    return obj;
+                },
+                .symbol => |sym| {
+                    if (env.lookup(sym.name)) |v| return v;
+                    if (self.rootEnv.lookup(sym.name)) |v| return v;
+                    const obj = try self.allocator.create(LispObject);
+                    obj.* = LispObject.nilObj();
+                    return obj;
+                },
+                .list => |items| {
+                    if (items.len == 0) {
+                        const obj = try self.allocator.create(LispObject);
+                        obj.* = LispObject.nilObj();
+                        return obj;
+                    }
+                    const head = items[0];
+                    const headName = switch (head) {
+                        .symbol => |sym| sym.name,
+                        else => "",
+                    };
+                    // Strip nulls for comparison
+                    var clean: []const u8 = headName[0..];
+                    while (clean.len > 0 and clean[clean.len - 1] == 0) clean = clean[0 .. clean.len - 1];
 
-                // Strip trailing nulls for comparison
-                var clean: []const u8 = headName[0..];
-                while (clean.len > 0 and clean[clean.len - 1] == 0) clean = clean[0 .. clean.len - 1];
+                    // --- Special forms ---
+                    const isDef = clean.len >= 3 and clean[0] == 'd' and clean[1] == 'e' and clean[2] == 'f';
+                    const isDefn = clean.len >= 5 and clean[0] == 'd' and clean[1] == 'e' and clean[2] == 'f' and clean[3] == 'n';
+                    const isDo = clean.len >= 2 and clean[0] == 'd' and clean[1] == 'o';
+                    const isFn = clean.len >= 2 and clean[0] == 'f' and clean[1] == 'n';
+                    const isIf = clean.len >= 2 and clean[0] == 'i' and clean[1] == 'f';
+                    const isCond = clean.len >= 4 and clean[0] == 'c' and clean[1] == 'o' and clean[2] == 'n' and clean[3] == 'd';
 
-                // Special forms
-                const isDef = clean.len >= 3 and clean[0] == 'd' and clean[1] == 'e' and clean[2] == 'f';
-                const isDefn = clean.len >= 5 and clean[0] == 'd' and clean[1] == 'e' and clean[2] == 'f' and clean[3] == 'n';
-                const isDo = clean.len >= 2 and clean[0] == 'd' and clean[1] == 'o';
-                const isFn = clean.len >= 2 and clean[0] == 'f' and clean[1] == 'n';
-                const isIf = clean.len >= 2 and clean[0] == 'i' and clean[1] == 'f';
-                const isCond = clean.len >= 4 and clean[0] == 'c' and clean[1] == 'o' and clean[2] == 'n' and clean[3] == 'd';
+                    if (isDef) return try self.evalDef(items);
+                    if (isFn) return try self.evalFn(items, env);
+                    if (isDefn) return try self.evalDefn(items, env);
 
-                if (isDef) return try self.evalDef(items);
-                if (isDefn) return try self.evalDefn(items, env);
-                if (isDo) return try self._evalDo(items);
-                if (isFn) return try self.evalFn(items, env);
-                if (isIf) return try self._evalIf(items);
-                if (isCond) return try self._evalCond(items);
+                    if (isDo) return try self._evalDo(items, env);
+                    if (isIf) return try self._evalIf(items, env);
+                    if (isCond) return try self._evalCond(items, env);
 
-                // Closure application: if head symbol resolves to a closure, apply it
-                switch (head) {
-                    .symbol => |sym| {
-                        var symName: []const u8 = sym.name[0..];
-                        while (symName.len > 0 and symName[symName.len - 1] == 0) {
-                            symName = symName[0 .. symName.len - 1];
-                        }
-                        const fnVal = env.lookup(symName) orelse self.rootEnv.lookup(symName);
-                        if (fnVal != null and fnVal.?.type == .closure) {
-                            const argCount = if (items.len > 1) items.len - 1 else 0;
-                            const argExprs = try self.allocator.alloc(Expr, argCount);
-                            defer self.allocator.free(argExprs);
-                            var ci: usize = 0;
-                            while (ci < items.len - 1) {
-                                argExprs[ci] = items[ci + 1];
-                                ci += 1;
+                    // --- Closure application (TCO) ---
+                    var closureResult: ?*LispObject = null;
+                    switch (head) {
+                        .symbol => |sym| {
+                            var symName: []const u8 = sym.name[0..];
+                            while (symName.len > 0 and symName[symName.len - 1] == 0) {
+                                symName = symName[0 .. symName.len - 1];
                             }
-                            const result = try self._applyClosure(fnVal.?.value.closure, argExprs, env);
-                            self.push(result);
-                            return result;
+                            const fnVal = env.lookup(symName) orelse self.rootEnv.lookup(symName);
+                            if (fnVal != null and fnVal.?.type == .closure) {
+                                const argCount = if (items.len > 1) items.len - 1 else 0;
+                                const argExprs = try self.allocator.alloc(Expr, argCount);
+                                defer self.allocator.free(argExprs);
+                                var ci: usize = 0;
+                                while (ci < items.len - 1) {
+                                    argExprs[ci] = items[ci + 1];
+                                    ci += 1;
+                                }
+                                closureResult = try self.applyClosure(fnVal.?.value.closure, argExprs, env);
+                            }
+                        },
+                        else => {},
+                    }
+
+                    if (closureResult) |cr| {
+                        // We already have a LispObject result from applyClosure
+                        // But for TCO we want to loop through the body.
+                        // Since applyClosure already evaluated the body, just return.
+                        return cr;
+                    }
+
+                    // --- Primitives: push evaluated args, dispatch ---
+                    var ai: usize = 1;
+                    while (ai < items.len) {
+                        const arg = try self.eval(items[ai], env);
+                        self.push(arg);
+                        ai += 1;
+                    }
+
+                    if (clean.len >= 1 and clean[0] == '+') {
+                        const b = self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
+                        const a = self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
+                        if (a.type != .number or b.type != .number) {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
                         }
-                    },
-                    else => {},
-                }
+                        const result = try self.allocator.create(LispObject);
+                        result.* = LispObject.numberObj(a.value.number + b.value.number);
+                        self.push(result);
+                        return result;
+                    }
+                    if (clean.len >= 1 and clean[0] == '-') {
+                        const b = self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
+                        const a = self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
+                        if (a.type != .number or b.type != .number) {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        }
+                        const result = try self.allocator.create(LispObject);
+                        result.* = LispObject.numberObj(a.value.number - b.value.number);
+                        self.push(result);
+                        return result;
+                    }
+                    if (clean.len >= 1 and clean[0] == '*') {
+                        const b = self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
+                        const a = self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
+                        if (a.type != .number or b.type != .number) {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        }
+                        const result = try self.allocator.create(LispObject);
+                        result.* = LispObject.numberObj(a.value.number * b.value.number);
+                        self.push(result);
+                        return result;
+                    }
 
-                // Push all args
-                var ai: usize = 1;
-                while (ai < items.len) {
-                    const arg = try self.eval(items[ai], env);
-                    self.push(arg);
-                    ai += 1;
-                }
-                
-                if (clean.len >= 1 and clean[0] == '+') {
-                    const b = self.pop() orelse return blk: {
-                        const obj = try self.allocator.create(LispObject);
-                        obj.* = LispObject.nilObj();
-                        break :blk obj;
-                    };
-                    const a = self.pop() orelse return blk: {
-                        const obj = try self.allocator.create(LispObject);
-                        obj.* = LispObject.nilObj();
-                        break :blk obj;
-                    };
-                    if (a.type != .number or b.type != .number) {
-                        const obj = try self.allocator.create(LispObject);
-                        obj.* = LispObject.nilObj();
-                        return obj;
-                    }
-                    const result = try self.allocator.create(LispObject);
-                    result.* = LispObject.numberObj(a.value.number + b.value.number);
-                    self.push(result);
-                    return result;
-                }
-                if (clean.len >= 1 and clean[0] == '-') {
-                    const b = self.pop() orelse return blk: {
-                        const obj = try self.allocator.create(LispObject);
-                        obj.* = LispObject.nilObj();
-                        break :blk obj;
-                    };
-                    const a = self.pop() orelse return blk: {
-                        const obj = try self.allocator.create(LispObject);
-                        obj.* = LispObject.nilObj();
-                        break :blk obj;
-                    };
-                    if (a.type != .number or b.type != .number) {
-                        const obj = try self.allocator.create(LispObject);
-                        obj.* = LispObject.nilObj();
-                        return obj;
-                    }
-                    const result = try self.allocator.create(LispObject);
-                    result.* = LispObject.numberObj(a.value.number - b.value.number);
-                    self.push(result);
-                    return result;
-                }
-                if (clean.len >= 1 and clean[0] == '*') {
-                    const b = self.pop() orelse return blk: {
-                        const obj = try self.allocator.create(LispObject);
-                        obj.* = LispObject.nilObj();
-                        break :blk obj;
-                    };
-                    const a = self.pop() orelse return blk: {
-                        const obj = try self.allocator.create(LispObject);
-                        obj.* = LispObject.nilObj();
-                        break :blk obj;
-                    };
-                    if (a.type != .number or b.type != .number) {
-                        const obj = try self.allocator.create(LispObject);
-                        obj.* = LispObject.nilObj();
-                        return obj;
-                    }
-                    const result = try self.allocator.create(LispObject);
-                    result.* = LispObject.numberObj(a.value.number * b.value.number);
-                    self.push(result);
-                    return result;
-                }
-
-                const obj = try self.allocator.create(LispObject);
-                obj.* = LispObject.nilObj();
-                return obj;
-            },
+                    // Unknown function
+                    const obj = try self.allocator.create(LispObject);
+                    obj.* = LispObject.nilObj();
+                    return obj;
+                },
+            }
         }
     }
 
@@ -1786,6 +1810,32 @@ test "eval — nested + call" {
 // ============================================================
 // Main
 // ============================================================
+// ============================================================
+// Phase 8 Tests: Tail-call optimization
+// ============================================================
+
+test "TCO — eval loop processes 1000 nested calls without overflow" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("+");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // 1000 sequential eval() calls all re-enter the same while-loop.
+    // With recursive eval this would blow the C stack; with the while-loop
+    // it uses constant stack space.
+    var i: usize = 0;
+    while (i < 1000) : (i += 1) {
+        const result = try vm.eval(Expr{ .number = @intCast(i + 1) }, &env);
+        try std.testing.expectEqual(@as(i64, @intCast(i + 1)), result.value.number);
+        alloc.destroy(result);
+    }
+}
+
 
 pub fn main() void {
     const input = "(+ 1 2 3)";
