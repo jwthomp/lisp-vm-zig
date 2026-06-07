@@ -201,6 +201,22 @@ pub const Parser = struct {
                 return Expr{ .list = try items.toOwnedSlice(self.arena.allocator()) };
             },
             .right_paren, .eof => return Expr.nilExpr(),
+            .quote => {
+                self.pos += 1;
+                // 'expr → (quote expr)
+                const inner = self.parseSExpr(depth + 1) catch {
+                    std.debug.print("quote: parse inner failed, pos={d}\n", .{self.pos});
+                    return Expr.nilExpr();
+                };
+                std.debug.print("quote: inner={any}, pos after={d}\n", .{inner, self.pos});
+                const quote_items: []Expr = try self.arena.allocator().dupe(
+                    Expr, &[2]Expr{
+                        Expr{ .symbol = try self.symtab.getOrPut("quote") },
+                        inner,
+                    },
+                );
+                return Expr{ .list = quote_items };
+            },
             else => {
                 self.pos += 1;
                 return self.parseAtom();
@@ -521,6 +537,20 @@ pub const Vm = struct {
         self.push(result);
     }
 
+    /// length(lst) — count cons cells in a list
+    pub fn primLength(self: *Vm) !void {
+        const obj = self.pop() orelse return error.StackUnderflow;
+        var n: usize = 0;
+        var curr: *LispObject = obj;
+        while (curr.type == .cons) {
+            curr = curr.value.cons.cdr;
+            n += 1;
+        }
+        const result = try self.allocator.create(LispObject);
+        result.* = LispObject.numberObj(@intCast(n));
+        self.push(result);
+    }
+
     /// Format a LispObject as a readable string.
     fn formatLispObject(self: *Vm, obj: *LispObject) ![]u8 {
         var buf = try self.allocator.alloc(u8, 512);
@@ -642,6 +672,92 @@ pub const Vm = struct {
         };
         try self.rootEnv.bind(name, val);
         return val;
+    }
+
+    /// Build a ConsCell chain from an Expr list, bottom-up.
+    fn _buildConsList(self: *Vm, ast: []Expr) !*LispObject {
+        if (ast.len == 0) {
+            const obj = try self.allocator.create(LispObject);
+            obj.* = LispObject.nilObj();
+            return obj;
+        }
+        var tail: *LispObject = try self.allocator.create(LispObject);
+        tail.* = switch (ast[ast.len - 1]) {
+            .nil => LispObject.nilObj(),
+            .number => |n| LispObject.numberObj(n),
+            .symbol => LispObject.nilObj(),
+            .list => LispObject.nilObj(),
+        };
+
+        var i: usize = ast.len - 1;
+        while (i > 0) : (i -= 1) {
+            const cell = try self.allocator.create(LispObject);
+            const cons_cell = try self.allocator.create(ConsCell);
+
+            const car_val: *LispObject = switch (ast[i - 1]) {
+                .nil => blk: {
+                    const o = try self.allocator.create(LispObject);
+                    o.* = LispObject.nilObj();
+                    break :blk o;
+                },
+                .number => |n| blk: {
+                    const o = try self.allocator.create(LispObject);
+                    o.* = LispObject.numberObj(n);
+                    break :blk o;
+                },
+                .symbol => blk: {
+                    const o = try self.allocator.create(LispObject);
+                    o.* = LispObject.nilObj();
+                    break :blk o;
+                },
+                .list => blk: {
+                    const o = try self.allocator.create(LispObject);
+                    o.* = LispObject.nilObj();
+                    break :blk o;
+                },
+            };
+
+            cons_cell.* = ConsCell{
+                .car = car_val,
+                .cdr = tail,
+            };
+            cell.* = LispObject{
+                .type = .cons,
+                .value = .{ .cons = cons_cell },
+                .next = null,
+            };
+            tail = cell;
+        }
+        return tail;
+    }
+
+    /// (quote arg) — return arg unevaluated
+    fn _evalQuote(self: *Vm, items: []Expr, env: *Environment) anyerror!*LispObject {
+        _ = env;
+        if (items.len < 2) return error.QuoteRequiresOneArg;
+        const arg = items[1];
+
+        switch (arg) {
+            .nil => {
+                const obj = try self.allocator.create(LispObject);
+                obj.* = LispObject.nilObj();
+                return obj;
+            },
+            .number => |n| {
+                const obj = try self.allocator.create(LispObject);
+                obj.* = LispObject.numberObj(n);
+                return obj;
+            },
+            .symbol => |sym| {
+                _ = sym;
+                const obj = try self.allocator.create(LispObject);
+                obj.* = LispObject.nilObj();
+                return obj;
+            },
+            .list => {
+                return try self._buildConsList(arg.list);
+            },
+        }
     }
 
     /// (do expr ...) — evaluate all, return last.
@@ -906,6 +1022,7 @@ pub const Vm = struct {
                     const isFn = clean.len >= 2 and clean[0] == 'f' and clean[1] == 'n';
                     const isIf = clean.len >= 2 and clean[0] == 'i' and clean[1] == 'f';
                     const isCond = clean.len >= 4 and clean[0] == 'c' and clean[1] == 'o' and clean[2] == 'n' and clean[3] == 'd';
+                    const isQuote = clean.len >= 5 and clean[0] == 'q' and clean[1] == 'u' and clean[2] == 'o' and clean[3] == 't' and clean[4] == 'e';
 
                     if (isDef) return try self.evalDef(items);
                     if (isFn) return try self.evalFn(items, env);
@@ -914,6 +1031,7 @@ pub const Vm = struct {
                     if (isDo) return try self._evalDo(items, env);
                     if (isIf) return try self._evalIf(items, env);
                     if (isCond) return try self._evalCond(items, env);
+                    if (isQuote) return try self._evalQuote(items, env);
 
                     // --- Closure application (TCO) ---
                     var closureResult: ?*LispObject = null;
@@ -1075,6 +1193,15 @@ pub const Vm = struct {
                         };
                     }
 
+                    if (std.mem.eql(u8, clean, "length")) {
+                        try self.callPrim("length");
+                        return self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
+                    }
+
                     // Unknown function — pop args that were pushed
                     ai = 1;
                     while (ai < items.len) : (ai += 1) {
@@ -1106,6 +1233,7 @@ pub const Vm = struct {
         if (std.mem.eql(u8, name, "symbol?")) return try self.primSymbolQ();
         if (std.mem.eql(u8, name, "number?")) return try self.primNumberQ();
         if (std.mem.eql(u8, name, "list?")) return try self.primListQ();
+        if (std.mem.eql(u8, name, "length")) return try self.primLength();
         return error.UnknownPrimitive;
     }
 };
@@ -2373,6 +2501,162 @@ test "list? — true for cons and nil, false for numbers" {
     const result_num = try vm.eval(Expr{ .list = items_num }, &env);
     defer alloc.destroy(result_num);
     try std.testing.expectEqual(@as(i64, 0), result_num.value.number);
+}
+
+// ============================================================
+// Phase 11 Tests: quote, length
+// ============================================================
+
+test "quote — returns number unevaluated" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // (quote 42) should return 42
+    const items: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("quote") },
+        Expr{ .number = 42 },
+    });
+    defer alloc.free(items);
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(ObjType.number, result.type);
+    try std.testing.expectEqual(@as(i64, 42), result.value.number);
+}
+
+test "quote — returns nil unevaluated" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // (quote nil) should return nil
+    const items: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("quote") },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(items);
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(ObjType.nil, result.type);
+}
+
+test "quote — returns list (not evaluated)" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // (quote (+ 1 2)) should return a list, not 3
+    const inner: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("+") },
+        Expr{ .number = 1 },
+        Expr{ .number = 2 },
+    });
+    const items: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("quote") },
+        Expr{ .list = inner },
+    });
+    defer alloc.free(items);
+    defer alloc.free(inner);
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(ObjType.cons, result.type);
+}
+
+test "length — returns 0 for nil" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const items: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("length") },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(items);
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(@as(i64, 0), result.value.number);
+}
+
+test "length — returns count of list elements" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("cons");
+    _ = try symtab.getOrPut("length");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // Build list: (cons 3 (cons 2 (cons 1 nil)))
+    const inner: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 1 },
+        Expr{ .nil = {} },
+    });
+    const middle: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 2 },
+        Expr{ .list = inner },
+    });
+    const outer: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 3 },
+        Expr{ .list = middle },
+    });
+
+    // (length (cons 3 (cons 2 (cons 1 nil)))) should return 3
+    const len_items: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("length") },
+        Expr{ .list = outer },
+    });
+    defer alloc.free(len_items);
+    defer alloc.free(outer);
+    defer alloc.free(middle);
+    defer alloc.free(inner);
+
+    const result = try vm.eval(Expr{ .list = len_items }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(@as(i64, 3), result.value.number);
+}
+
+test "quote — apostrophe syntax via parser" {
+    // Parse '42 — the apostrophe before 42 produces quote
+    const input = "'42)";
+    var lexer = Lexer.init(input);
+    const tok1 = lexer.nextToken(); // should be .quote
+    try std.testing.expectEqual(.quote, tok1);
+    const tok2 = lexer.nextToken(); // should be .number (42)
+    try std.testing.expectEqual(.number, tok2);
+    const tok3 = lexer.nextToken(); // should be .right_paren
+    try std.testing.expectEqual(.right_paren, tok3);
+    const tok4 = lexer.nextToken(); // should be .eof
+    try std.testing.expectEqual(.eof, tok4);
 }
 
 test "REPL — processes input lines in a loop" {
