@@ -1217,7 +1217,79 @@ pub const Vm = struct {
         return self.eval(expr, env);
     }
 
-    /// (fn (params...) body...) — create closure object.
+    /// (let ((name val) ...) body...) — sequential local bindings.
+    /// Creates a child environment with a dedicated arena for automatic cleanup.
+    pub fn _evalLet(self: *Vm, items: []Expr, env: *Environment) anyerror!*LispObject {
+        if (items.len < 3) return error.LetRequiresBindingsAndBody;
+
+        const bindingsExpr = items[1];
+        const bodyExprs = items[2..];
+
+        // Bindings must be a list: ((name val) (name val) ...)
+        switch (bindingsExpr) {
+            .list => |bindingsList| {
+                // Allocate a dedicated arena for this let scope
+                const childArena = try self.allocator.create(std.heap.ArenaAllocator);
+                childArena.* = std.heap.ArenaAllocator.init(self.allocator);
+                errdefer self.allocator.destroy(childArena);
+
+                // Create child environment
+                const childEnv = try self.allocator.create(Environment);
+                childEnv.* = Environment.init(env, childArena.allocator());
+                errdefer self.allocator.destroy(childEnv);
+
+                // Evaluate bindings sequentially (each binding sees previous ones)
+                var bi: usize = 0;
+                while (bi < bindingsList.len) : (bi += 1) {
+                    const pairExpr = bindingsList[bi];
+                    switch (pairExpr) {
+                        .list => |pair| {
+                            if (pair.len >= 2) {
+                                switch (pair[0]) {
+                                    .symbol => |sym| {
+                                        var name: []const u8 = sym.name[0..];
+                                        while (name.len > 0 and name[name.len - 1] == 0) {
+                                            name = name[0 .. name.len - 1];
+                                        }
+                                        // Evaluate value in current let env
+                                        const valObj = try self.eval(pair[1], childEnv);
+                                        errdefer self.allocator.destroy(valObj);
+                                        try childEnv.bind(name, valObj);
+                                    },
+                                    else => {},
+                                }
+                            }
+                        },
+                        else => {},
+                    }
+                }
+
+                // Evaluate body
+                const result: *LispObject = try self.allocator.create(LispObject);
+                result.* = LispObject.nilObj();
+                var i: usize = 0;
+                while (i < bodyExprs.len) : (i += 1) {
+                    if (i + 1 < bodyExprs.len) {
+                        const tmp = try self.eval(bodyExprs[i], childEnv);
+                        self.allocator.destroy(tmp);
+                    } else {
+                        result.* = (try self.eval(bodyExprs[i], childEnv)).*;
+                    }
+                }
+
+                // Cleanup
+                childEnv.deinit();
+                self.allocator.destroy(childEnv);
+                childArena.deinit();
+                self.allocator.destroy(childArena);
+
+                return result;
+            },
+            else => return error.LetBindingsMustBeList,
+        }
+    }
+
+        /// (fn (params...) body...) — create closure object.
     pub fn evalFn(self: *Vm, items: []Expr, env: *Environment) !*LispObject {
         if (items.len < 3) return error.FnRequiresParamsAndBody;
         const paramsExpr = items[1];
@@ -1397,7 +1469,7 @@ pub const Vm = struct {
         result.* = LispObject.nilObj();
         var i: usize = 0;
         while (i < cl.body.len) : (i += 1) {
-            self.allocator.destroy(result);
+            if (i > 0) self.allocator.destroy(result);
             result = try self.eval(cl.body[i], childEnv);
         }
         
@@ -1533,6 +1605,7 @@ pub const Vm = struct {
                     const isIf = clean.len >= 2 and clean[0] == 'i' and clean[1] == 'f';
                     const isCond = clean.len >= 4 and clean[0] == 'c' and clean[1] == 'o' and clean[2] == 'n' and clean[3] == 'd';
                     const isQuote = clean.len >= 5 and clean[0] == 'q' and clean[1] == 'u' and clean[2] == 'o' and clean[3] == 't' and clean[4] == 'e';
+                    const isLet = clean.len >= 3 and clean[0] == 'l' and clean[1] == 'e' and clean[2] == 't';
                     const isDefmacro = clean.len >= 8 and clean[0] == 'd' and clean[1] == 'e' and clean[2] == 'f' and clean[3] == 'm' and clean[4] == 'a' and clean[5] == 'c' and clean[6] == 'r' and clean[7] == 'o';
 
                     if (isDef) return try self.evalDef(items);
@@ -1544,6 +1617,7 @@ pub const Vm = struct {
                     if (isIf) return try self._evalIf(items, env);
                     if (isCond) return try self._evalCond(items, env);
                     if (isQuote) return try self._evalQuote(items, env);
+                    if (isLet) return try self._evalLet(items, env);
 
                     // --- Closure application (TCO) ---
                     var closureResult: ?*LispObject = null;
@@ -3667,6 +3741,186 @@ test "primFilter — filters list by predicate" {
     defer alloc.destroy(result);
     try std.testing.expectEqual(ObjType.cons, result.type);
 }
+
+// --- Let tests ---
+test "evalLet — basic binding" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    _ = try symtab.getOrPut("let");
+    _ = try symtab.getOrPut("x");
+    _ = try symtab.getOrPut("y");
+    _ = try symtab.getOrPut("+");
+
+    // (let ((x 10) (y 20)) (+ x y))
+    const xPair: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("x") },
+        Expr{ .number = 10 },
+    });
+    defer alloc.free(xPair);
+
+    const yPair: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("y") },
+        Expr{ .number = 20 },
+    });
+    defer alloc.free(yPair);
+
+    const bindings: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .list = xPair },
+        Expr{ .list = yPair },
+    });
+    defer alloc.free(bindings);
+
+    const body: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("+") },
+        Expr{ .symbol = try symtab.getOrPut("x") },
+        Expr{ .symbol = try symtab.getOrPut("y") },
+    });
+    defer alloc.free(body);
+
+    const items: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("let") },
+        Expr{ .list = bindings },
+        Expr{ .list = body },
+    });
+    defer alloc.free(items);
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(ObjType.number, result.type);
+    try std.testing.expectEqual(@as(i64, 30), result.value.number);
+}
+
+test "evalLet — shadowing" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    _ = try symtab.getOrPut("let");
+    _ = try symtab.getOrPut("x");
+    _ = try symtab.getOrPut("+");
+
+    // Inner let: (let ((x 5)) (+ x 1))
+    const innerPair: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("x") },
+        Expr{ .number = 5 },
+    });
+    defer alloc.free(innerPair);
+
+    // bindings = [[x, 5]] — list containing one pair
+    const innerBindings: []Expr = try alloc.dupe(Expr, &[1]Expr{
+        Expr{ .list = innerPair },
+    });
+    defer alloc.free(innerBindings);
+
+    const innerBody: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("+") },
+        Expr{ .symbol = try symtab.getOrPut("x") },
+        Expr{ .number = 1 },
+    });
+    defer alloc.free(innerBody);
+
+    const innerItems: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("let") },
+        Expr{ .list = innerBindings },
+        Expr{ .list = innerBody },
+    });
+    defer alloc.free(innerItems);
+
+    const innerResult = try vm.eval(Expr{ .list = innerItems }, &env);
+    defer alloc.destroy(innerResult);
+    try std.testing.expectEqual(@as(i64, 6), innerResult.value.number);
+
+    // Outer let: (let ((x 10)) (let ((x 5)) (+ x 1)))
+    const outerPair: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("x") },
+        Expr{ .number = 10 },
+    });
+    defer alloc.free(outerPair);
+
+    // bindings = [[x, 10]]
+    const outerBindings: []Expr = try alloc.dupe(Expr, &[1]Expr{
+        Expr{ .list = outerPair },
+    });
+    defer alloc.free(outerBindings);
+
+    const outerItems: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("let") },
+        Expr{ .list = outerBindings },
+        Expr{ .list = innerItems },
+    });
+    defer alloc.free(outerItems);
+
+    const outerResult = try vm.eval(Expr{ .list = outerItems }, &env);
+    defer alloc.destroy(outerResult);
+    try std.testing.expectEqual(@as(i64, 6), outerResult.value.number);
+}
+
+test "evalLet — binding visibility to next binding" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    _ = try symtab.getOrPut("let");
+    _ = try symtab.getOrPut("x");
+    _ = try symtab.getOrPut("y");
+    _ = try symtab.getOrPut("*");
+
+    // (let ((x 3) (y (* x 2))) y) — y should see x=3
+    const xPair: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("x") },
+        Expr{ .number = 3 },
+    });
+    defer alloc.free(xPair);
+
+    // y val is (* x 2)
+    const yValBody: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("*") },
+        Expr{ .symbol = try symtab.getOrPut("x") },
+        Expr{ .number = 2 },
+    });
+    defer alloc.free(yValBody);
+
+    const yPair: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("y") },
+        Expr{ .list = yValBody },
+    });
+    defer alloc.free(yPair);
+
+    const bindings: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .list = xPair },
+        Expr{ .list = yPair },
+    });
+    defer alloc.free(bindings);
+
+    const items: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("let") },
+        Expr{ .list = bindings },
+        Expr{ .symbol = try symtab.getOrPut("y") },
+    });
+    defer alloc.free(items);
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(@as(i64, 6), result.value.number);
+}
+
 
 
 
