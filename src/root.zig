@@ -473,6 +473,54 @@ pub const Vm = struct {
         self.push(nil_obj);
     }
 
+    /// Type predicates: null?(x) → returns 1 if nil, 0 otherwise
+    pub fn primNullQ(self: *Vm) !void {
+        const obj = self.pop() orelse return error.StackUnderflow;
+        const result = try self.allocator.create(LispObject);
+        if (obj.type == .nil) {
+            result.* = LispObject.numberObj(1);
+        } else {
+            result.* = LispObject.numberObj(0);
+        }
+        self.push(result);
+    }
+
+    /// Type predicates: symbol?(x) → returns 1 if symbol, 0 otherwise
+    pub fn primSymbolQ(self: *Vm) !void {
+        const obj = self.pop() orelse return error.StackUnderflow;
+        const result = try self.allocator.create(LispObject);
+        if (obj.type == .symbol) {
+            result.* = LispObject.numberObj(1);
+        } else {
+            result.* = LispObject.numberObj(0);
+        }
+        self.push(result);
+    }
+
+    /// Type predicates: number?(x) → returns 1 if number, 0 otherwise
+    pub fn primNumberQ(self: *Vm) !void {
+        const obj = self.pop() orelse return error.StackUnderflow;
+        const result = try self.allocator.create(LispObject);
+        if (obj.type == .number) {
+            result.* = LispObject.numberObj(1);
+        } else {
+            result.* = LispObject.numberObj(0);
+        }
+        self.push(result);
+    }
+
+    /// Type predicates: list?(x) → returns 1 if ConsCell or nil, 0 otherwise
+    pub fn primListQ(self: *Vm) !void {
+        const obj = self.pop() orelse return error.StackUnderflow;
+        const result = try self.allocator.create(LispObject);
+        if (obj.type == .cons or obj.type == .nil) {
+            result.* = LispObject.numberObj(1);
+        } else {
+            result.* = LispObject.numberObj(0);
+        }
+        self.push(result);
+    }
+
     /// Format a LispObject as a readable string.
     fn formatLispObject(self: *Vm, obj: *LispObject) ![]u8 {
         var buf = try self.allocator.alloc(u8, 512);
@@ -994,6 +1042,38 @@ pub const Vm = struct {
                             return obj;
                         };
                     }
+                    if (std.mem.eql(u8, clean, "null?")) {
+                        try self.callPrim("null?");
+                        return self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
+                    }
+                    if (std.mem.eql(u8, clean, "symbol?")) {
+                        try self.callPrim("symbol?");
+                        return self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
+                    }
+                    if (std.mem.eql(u8, clean, "number?")) {
+                        try self.callPrim("number?");
+                        return self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
+                    }
+                    if (std.mem.eql(u8, clean, "list?")) {
+                        try self.callPrim("list?");
+                        return self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
+                    }
 
                     // Unknown function — pop args that were pushed
                     ai = 1;
@@ -1022,6 +1102,10 @@ pub const Vm = struct {
         if (std.mem.eql(u8, name, "car")) return try self.primCar();
         if (std.mem.eql(u8, name, "cdr")) return try self.primCdr();
         if (std.mem.eql(u8, name, "print")) return try self.primPrint();
+        if (std.mem.eql(u8, name, "null?")) return try self.primNullQ();
+        if (std.mem.eql(u8, name, "symbol?")) return try self.primSymbolQ();
+        if (std.mem.eql(u8, name, "number?")) return try self.primNumberQ();
+        if (std.mem.eql(u8, name, "list?")) return try self.primListQ();
         return error.UnknownPrimitive;
     }
 };
@@ -2125,6 +2209,170 @@ test "primPrint — prints list (cons 1 (cons 2 nil))" {
     alloc.free(outer);
     alloc.free(middle);
     alloc.free(inner);
+}
+
+// --- Type predicate tests ---
+
+test "null? — true for nil" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("null?");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const items: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("null?") },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(items);
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(@as(i64, 1), result.value.number);
+}
+
+test "null? — false for non-nil" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("null?");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const items: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("null?") },
+        Expr{ .number = 42 },
+    });
+    defer alloc.free(items);
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(@as(i64, 0), result.value.number);
+}
+
+test "symbol? — returns 0 for unbound symbol (evaluates to nil)" {
+    // Without quote, symbol expressions resolve to their value or nil.
+    // An unbound symbol evaluates to nil, and symbol? on nil returns 0.
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("symbol?");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const items: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("symbol?") },
+        Expr{ .symbol = try symtab.getOrPut("foo") },
+    });
+    defer alloc.free(items);
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    defer alloc.destroy(result);
+    // foo is unbound → evaluates to nil → symbol? nil → 0
+    try std.testing.expectEqual(@as(i64, 0), result.value.number);
+}
+
+test "number? — returns 1 for numbers, 0 for nil" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("symbol?");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const items: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("symbol?") },
+        Expr{ .number = 42 },
+    });
+    defer alloc.free(items);
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(@as(i64, 0), result.value.number);
+}
+
+test "number? — true for numbers, false for nil" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("number?");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const items: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("number?") },
+        Expr{ .number = 7 },
+    });
+    defer alloc.free(items);
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    defer alloc.destroy(result);
+    try std.testing.expectEqual(@as(i64, 1), result.value.number);
+}
+
+test "list? — true for cons and nil, false for numbers" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("list?");
+    _ = try symtab.getOrPut("cons");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // list? on nil
+    const items_n: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("list?") },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(items_n);
+    const result_n = try vm.eval(Expr{ .list = items_n }, &env);
+    defer alloc.destroy(result_n);
+    try std.testing.expectEqual(@as(i64, 1), result_n.value.number);
+
+    // list? on (cons 1 2)
+    const inner: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 1 },
+        Expr{ .number = 2 },
+    });
+    const items_c: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("list?") },
+        Expr{ .list = inner },
+    });
+    defer alloc.free(items_c);
+    const result_c = try vm.eval(Expr{ .list = items_c }, &env);
+    defer alloc.destroy(result_c);
+    defer alloc.free(inner);
+    try std.testing.expectEqual(@as(i64, 1), result_c.value.number);
+
+    // list? on number
+    const items_num: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("list?") },
+        Expr{ .number = 42 },
+    });
+    defer alloc.free(items_num);
+    const result_num = try vm.eval(Expr{ .list = items_num }, &env);
+    defer alloc.destroy(result_num);
+    try std.testing.expectEqual(@as(i64, 0), result_num.value.number);
 }
 
 test "REPL — processes input lines in a loop" {

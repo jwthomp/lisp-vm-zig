@@ -715,10 +715,10 @@ builtin  → "#<builtin>"
 | **3** | Env scoping, Vm stack ops | 7 | ✅ Done |
 | **4** | Primitives: +, -, *, /, =, <, > | 7 | ✅ Done |
 | **5** | `def`, `let` | 4 | 🔲 |
-| **6** | `if`, `cond`, `do` | 5 | 🔲 |
-| **7** | `fn`, `defn`, closure application | 6 | 🔲 |
-| **8** | Tail-call optimization | 3 | 🔲 |
-| **9** | REPL, `print`, `cons`/`car`/`cdr` | 8 | 🔲 |
+| **6** | `if`, `cond`, `do` | 5 | ✅ Done |
+| **7** | `fn`, `defn`, closure application | 6 | ✅ Done |
+| **8** | Tail-call optimization (while-loop eval) | 1 | ✅ Done |
+| **9** | REPL, `print`, `cons`/`car`/`cdr` | 7 | ✅ Done |
 | **10**| `null?`/`symbol?`/`number?`/`list?` | 4 | 🔲 |
 | **11**| `length`, `quote` | 3 | 🔲 |
 
