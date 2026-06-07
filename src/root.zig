@@ -282,6 +282,7 @@ pub const BuiltinKind = enum {
     null, symbol, number, list,
     length,
     append, reverse, member, assoc, map, filter,
+    println,
 };
 
 pub const ConsCell = struct {
@@ -391,6 +392,7 @@ pub const Vm = struct {
         vm._registerBuiltin("assoc", .assoc);
         vm._registerBuiltin("map", .map);
         vm._registerBuiltin("filter", .filter);
+        vm._registerBuiltin("println", .println);
 
         return vm;
     }
@@ -932,14 +934,16 @@ pub const Vm = struct {
             .number => |n| {
                 var tmp: [32]u8 = undefined;
                 const s = std.fmt.bufPrint(&tmp, "{d}", .{n}) catch return error.FormatFailed;
-                std.mem.copyForwards(u8, buf[pos.*..], s); pos.* += s.len;
+                if (pos.* + s.len <= buf.len) {
+                    std.mem.copyForwards(u8, buf[pos.*..], s); pos.* += s.len;
+                }
             },
             .symbol => |sym| {
                 const name = sym.name[0 .. sym.name.len - 1];
                 std.mem.copyForwards(u8, buf[pos.*..], name); pos.* += name.len;
             },
             .cons => |cell| {
-                _ = cell; // unused
+                _ = cell;
                 const max_elems: usize = 64;
                 const elem_buf = try self.allocator.alloc(*LispObject, max_elems);
                 defer self.allocator.free(elem_buf);
@@ -951,14 +955,16 @@ pub const Vm = struct {
                     elem_count += 1;
                 }
                 if (elem_count > 0 and curr.type == .nil) {
+                    if (pos.* + 1 + elem_count * 32 + elem_count + 1 > buf.len) return error.FormatTooLong;
                     buf[pos.*] = '('; pos.* += 1;
                     var ei: usize = 0;
                     while (ei < elem_count) : (ei += 1) {
                         if (ei > 0) { buf[pos.*] = ' '; pos.* += 1; }
                         try self._formatToString(buf, pos, elem_buf[ei]);
                     }
-                    buf[pos.*] = ')'; pos.* += 1;
+                    if (pos.* < buf.len) { buf[pos.*] = ')'; pos.* += 1; }
                 } else if (elem_count > 0) {
+                    if (pos.* + 1 + elem_count * 32 + elem_count + 4 > buf.len) return error.FormatTooLong;
                     buf[pos.*] = '('; pos.* += 1;
                     var ei: usize = 0;
                     while (ei < elem_count) : (ei += 1) {
@@ -966,9 +972,11 @@ pub const Vm = struct {
                         try self._formatToString(buf, pos, elem_buf[ei]);
                     }
                     const dot = " . ";
-                    std.mem.copyForwards(u8, buf[pos.*..], dot); pos.* += dot.len;
+                    if (pos.* + 3 <= buf.len) {
+                        std.mem.copyForwards(u8, buf[pos.*..], dot); pos.* += dot.len;
+                    }
                     try self._formatToString(buf, pos, curr);
-                    buf[pos.*] = ')'; pos.* += 1;
+                    if (pos.* < buf.len) { buf[pos.*] = ')'; pos.* += 1; }
                 } else {
                     const empty = "()";
                     std.mem.copyForwards(u8, buf[pos.*..], empty); pos.* += empty.len;
@@ -977,6 +985,35 @@ pub const Vm = struct {
             .closure => { const s = "#<closure>"; std.mem.copyForwards(u8, buf[pos.*..], s); pos.* += s.len; },
             .builtin => { const s = "#<builtin>"; std.mem.copyForwards(u8, buf[pos.*..], s); pos.* += s.len; },
         }
+    }
+
+    /// (println arg...) — print multiple args space-separated, each on its own line.
+    pub fn primPrintln(self: *Vm) !void {
+        // Collect all remaining stack items (bottom to top)
+        var items = try self.allocator.alloc(*LispObject, self.stack.items.len);
+        defer self.allocator.free(items);
+        var i: usize = 0;
+        while (i < self.stack.items.len) : (i += 1) {
+            items[i] = self.stack.items[i];
+        }
+        self.stack.clearRetainingCapacity();
+
+        // Print each arg on its own line
+        i = 0;
+        while (i < items.len) : (i += 1) {
+            var buf: [512]u8 = undefined;
+            var pos: usize = 0;
+            const obj = items[i];
+            try self._formatToString(&buf, &pos, obj);
+            std.debug.print("{s}\n", .{buf[0..pos]}); 
+        }
+
+        self.allocator.free(items);
+
+        // Return nil
+        const nil_obj = try self.allocator.create(LispObject);
+        nil_obj.* = LispObject.nilObj();
+        self.push(nil_obj);
     }
 
     /// Print a value for REPL output.
@@ -1696,6 +1733,7 @@ pub const Vm = struct {
                                 .assoc => try self.primAssoc(),
                                 .map => try self.primMap(),
                                 .filter => try self.primFilter(),
+                                .println => try self.primPrintln(),
                             }
                             return self.pop() orelse {
                                 const obj = try self.allocator.create(LispObject);
@@ -3924,6 +3962,7 @@ test "evalLet — binding visibility to next binding" {
 
 
 
+
 /// REPL with history, arrow key navigation, and macro support
 fn replMain(self: *Vm, alloc: std.heap.PageAllocator) anyerror!void {
     const stdin = std.io.getStdIn();
@@ -4109,7 +4148,8 @@ fn replMain(self: *Vm, alloc: std.heap.PageAllocator) anyerror!void {
     }
 }
 
-pub fn main() void {
+/// REPL entry point — blocks waiting for user input.
+pub fn replEntry() !void {
     const alloc = std.heap.page_allocator;
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -4127,3 +4167,5 @@ pub fn main() void {
         std.debug.print("REPL error: {any}\n", .{err});
     };
 }
+
+
