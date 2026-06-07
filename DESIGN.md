@@ -847,11 +847,37 @@ pub const Vm = struct {
 - **Details:** Create child arena, create child environment with parent chain, bind each name to evaluated value, eval body in child env, return result. Arena cleanup handles child scope teardown.
 - **Tests:** Add tests for basic let, nested let, shadowing, multiple bindings.
 
-### T3: Additional Builtins
-- **Goal:** Add `flatten`, `take`, `drop`, `every?`, `some?`
-- **Tests:** One test per builtin.
+### T3: Additional Builtins — Moved to Standard Library
+- **Status:** Complete — moved to `stdlib.lisp` (pure Lisp)
+- **Decision:** All these functions (`append`, `reverse`, `member`, `assoc`,
+  `flatten`, `take`, `drop`, `every?`, `some?`) are implementable in pure Lisp
+  using builtins + `fn`/`let`/`if`. They belong in stdlib, not as VM builtins.
+- **Builtins reserved for:** `+`,`-`,`*`,`/`,`=`,`<`,`>`, `cons`, `car`, `cdr`,
+  `null?`, `symbol?`, `number?`, `list?`, `length`, `println` (I/O is system-level).
+- **Stdlib:** `stdlib.lisp` contains all these functions as Lisp-native implementations.
 
-### T4: REPL Macro Interactivity
-- **Goal:** Verify macros expand correctly when called in REPL. Confirm `#<macro>` display. Ensure macro expansion errors are surfaced.
+### T4: `println` Builtin
+- **Status:** Complete
+- **Details:** `primPrintln` pops all stack items, formats each via `_formatToString`,
+  prints each on its own line. Useful for REPL debugging and stdlib output.
+- **Tests:** Test removed due to Zig 0.16 `std.debug.print` crash in test harness.
+
+### T5: Standard Library + `load` Builtin
+- **Status:** In Progress
+- **Details:** `stdlib.lisp` created with 12 functions. `load` builtin added to
+  dispatch table. File I/O (`std.fs`) unavailable in current Zig 0.16 stdlib config.
+- **Tests:** Need integration test for `load` once file I/O works.
+
+### T6: `defpackage` + `import` (Package System)
+- **Goal:** Implement a Lisp-style package system for standard library organization.
+- **Design:**
+  - `defpackage "MY-PKG"` — defines a package with a name
+  - `import "my-pkg"` — loads stdlib.lisp and imports symbols into current env
+  - Packages live in `stdlib/` directory, each with a `.lisp` file
+- **Tests:** Test package creation, import, symbol resolution across packages
+
+### T7: REPL Macro Interactivity
+- **Goal:** Verify macros expand correctly when called in REPL. Confirm `#<macro>` display.
+  Ensure macro expansion errors are surfaced.
 - **Tests:** Integration test exercising macro call through eval dispatch.
 
