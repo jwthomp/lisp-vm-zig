@@ -274,6 +274,16 @@ pub const LispObject = struct {
     }
 };
 
+/// Builtin dispatch enum — avoids function pointer circular references.
+pub const BuiltinKind = enum {
+    add, sub, mul, div, eq, lt, gt,
+    cons, car, cdr,
+    print,
+    null, symbol, number, list,
+    length,
+    append, reverse, member, assoc, map, filter,
+};
+
 pub const ConsCell = struct {
     car: *LispObject,
     cdr: *LispObject,
@@ -343,19 +353,63 @@ pub const Vm = struct {
     allocator: Allocator,
     rootEnv: *Environment,
     macroArgs: std.StringHashMap(Expr),
+    dispatch_table: *std.StringHashMap(BuiltinKind),
 
     pub fn init(allocator: Allocator, env: *Environment) Vm {
-        return Vm{
+        const dt = allocator.create(std.StringHashMap(BuiltinKind)) catch unreachable;
+        dt.* = std.StringHashMap(BuiltinKind).init(allocator);
+        errdefer allocator.destroy(dt);
+
+        var vm = Vm{
             .stack = std.ArrayList(*LispObject).initCapacity(allocator, 8) catch unreachable,
             .allocator = allocator,
             .rootEnv = env,
             .macroArgs = std.StringHashMap(Expr).init(allocator),
+            .dispatch_table = dt,
         };
+
+        // Register all builtins
+        vm._registerBuiltin("+", .add);
+        vm._registerBuiltin("-", .sub);
+        vm._registerBuiltin("*", .mul);
+        vm._registerBuiltin("/", .div);
+        vm._registerBuiltin("=", .eq);
+        vm._registerBuiltin("<", .lt);
+        vm._registerBuiltin(">", .gt);
+        vm._registerBuiltin("cons", .cons);
+        vm._registerBuiltin("car", .car);
+        vm._registerBuiltin("cdr", .cdr);
+        vm._registerBuiltin("print", .print);
+        vm._registerBuiltin("null?", .null);
+        vm._registerBuiltin("symbol?", .symbol);
+        vm._registerBuiltin("number?", .number);
+        vm._registerBuiltin("list?", .list);
+        vm._registerBuiltin("length", .length);
+        vm._registerBuiltin("append", .append);
+        vm._registerBuiltin("reverse", .reverse);
+        vm._registerBuiltin("member", .member);
+        vm._registerBuiltin("assoc", .assoc);
+        vm._registerBuiltin("map", .map);
+        vm._registerBuiltin("filter", .filter);
+
+        return vm;
+    }
+
+    fn _registerBuiltin(self: *Vm, name: []const u8, kind: BuiltinKind) void {
+        const key = self.allocator.dupe(u8, name) catch unreachable;
+        const e = self.dispatch_table.getOrPut(key) catch unreachable;
+        e.value_ptr.* = kind;
     }
 
     pub fn deinit(self: *Vm) void {
         self.stack.deinit(self.allocator);
         self.macroArgs.deinit();
+        var it = self.dispatch_table.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.dispatch_table.deinit();
+        self.allocator.destroy(self.dispatch_table);
     }
 
     pub fn push(self: *Vm, obj: *LispObject) void {
@@ -1535,201 +1589,46 @@ pub const Vm = struct {
                         return cr;
                     }
 
-                    // --- Primitives: push evaluated args, dispatch via callPrim ---
+                    // --- Primitives: push evaluated args, dispatch via O(1) table lookup ---
                     var ai: usize = 1;
                     while (ai < items.len) : (ai += 1) {
                         const arg = try self.eval(items[ai], env);
                         self.push(arg);
                     }
 
-                    if (std.mem.eql(u8, clean, "+")) {
-                        try self.callPrim("+");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, "-")) {
-                        try self.callPrim("-");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, "*")) {
-                        try self.callPrim("*");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, "/")) {
-                        try self.callPrim("/");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, "=")) {
-                        try self.callPrim("=");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, "<")) {
-                        try self.callPrim("<");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, ">")) {
-                        try self.callPrim(">");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, "cons")) {
-                        try self.callPrim("cons");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, "car")) {
-                        try self.callPrim("car");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, "cdr")) {
-                        try self.callPrim("cdr");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, "print")) {
-                        try self.callPrim("print");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, "null?")) {
-                        try self.callPrim("null?");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, "symbol?")) {
-                        try self.callPrim("symbol?");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, "number?")) {
-                        try self.callPrim("number?");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, "list?")) {
-                        try self.callPrim("list?");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-
-                    if (std.mem.eql(u8, clean, "length")) {
-                        try self.callPrim("length");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, "append")) {
-                        try self.callPrim("append");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, "reverse")) {
-                        try self.callPrim("reverse");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, "member")) {
-                        try self.callPrim("member");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, "assoc")) {
-                        try self.callPrim("assoc");
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    // --- map fn list / filter pred list — handle before unknown function ---
-                    if (std.mem.eql(u8, clean, "map")) {
-                        // Push all args for eval
-                        var ai_map: usize = 1;
-                        while (ai_map < items.len) : (ai_map += 1) {
-                            const arg = try self.eval(items[ai_map], env);
-                            self.push(arg);
+                    // O(1) dispatch: hash map replaces 22+ string comparisons
+                    if (clean.len > 0) {
+                        if (self.dispatch_table.get(clean)) |kind| {
+                            switch (kind) {
+                                .add => try self.primAdd(),
+                                .sub => try self.primSub(),
+                                .mul => try self.primMul(),
+                                .div => try self.primDiv(),
+                                .eq => try self.primEq(),
+                                .lt => try self.primLt(),
+                                .gt => try self.primGt(),
+                                .cons => try self.primCons(),
+                                .car => try self.primCar(),
+                                .cdr => try self.primCdr(),
+                                .print => try self.primPrint(),
+                                .null => try self.primNullQ(),
+                                .symbol => try self.primSymbolQ(),
+                                .number => try self.primNumberQ(),
+                                .list => try self.primListQ(),
+                                .length => try self.primLength(),
+                                .append => try self.primAppend(),
+                                .reverse => try self.primReverse(),
+                                .member => try self.primMember(),
+                                .assoc => try self.primAssoc(),
+                                .map => try self.primMap(),
+                                .filter => try self.primFilter(),
+                            }
+                            return self.pop() orelse {
+                                const obj = try self.allocator.create(LispObject);
+                                obj.* = LispObject.nilObj();
+                                return obj;
+                            };
                         }
-                        try self.primMap();
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
-                    }
-                    if (std.mem.eql(u8, clean, "filter")) {
-                        var ai_flt: usize = 1;
-                        while (ai_flt < items.len) : (ai_flt += 1) {
-                            const arg = try self.eval(items[ai_flt], env);
-                            self.push(arg);
-                        }
-                        try self.primFilter();
-                        return self.pop() orelse {
-                            const obj = try self.allocator.create(LispObject);
-                            obj.* = LispObject.nilObj();
-                            return obj;
-                        };
                     }
 
                     // Unknown function — pop args that were pushed

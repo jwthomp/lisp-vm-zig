@@ -824,3 +824,25 @@ pub const Vm = struct {
     pub fn astListToConsCell(self: *Vm, exprs: []Expr) !*LispObject;
 };
 ```
+
+
+## Task Tracker
+
+### T1: Performance — Symbol-to-Dispatch Table (O(1) lookup)
+- **Goal:** Replace character-by-character string comparison in eval dispatch with a `StringHashMap` that maps symbol names to dispatch functions.
+- **Details:** Current eval checks `clean[0]=='d' and clean[1]=='e'...` for every symbol lookup. Build a dispatch table at VM init that maps `"+"` → primAdd, `"defn"` → evalDefn, etc. All entries should use a common function pointer type wrapping `*Vm`.
+- **Tests:** Ensure all existing 74 tests still pass. Add a benchmark comparing old vs new dispatch.
+
+### T2: Fix `let` Binding
+- **Goal:** Implement `let` special form: `(let ((x 1) (y 2)) (+ x y))`
+- **Details:** Create child arena, create child environment with parent chain, bind each name to evaluated value, eval body in child env, return result. Arena cleanup handles child scope teardown.
+- **Tests:** Add tests for basic let, nested let, shadowing, multiple bindings.
+
+### T3: Additional Builtins
+- **Goal:** Add `flatten`, `take`, `drop`, `every?`, `some?`
+- **Tests:** One test per builtin.
+
+### T4: REPL Macro Interactivity
+- **Goal:** Verify macros expand correctly when called in REPL. Confirm `#<macro>` display. Ensure macro expansion errors are surfaced.
+- **Tests:** Integration test exercising macro call through eval dispatch.
+
