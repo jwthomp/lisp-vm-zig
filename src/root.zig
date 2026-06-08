@@ -4582,3 +4582,130 @@ test "example — even? inline: (even? 4) = 0 (false)" {
     try std.testing.expectEqual(@as(i64, 0), result.value.number);
 }
 
+// ============================================================
+// CLI Entry Point
+// ============================================================
+
+pub fn replLoop(vm: *Vm, env: *Environment) void {
+    const stdin_file = std.Io.getStdIn();
+    var buffer: [1024]u8 = undefined;
+    var line_buf = std.ArrayListUnmanaged(u8).init(std.heap.page_allocator);
+    defer line_buf.deinit();
+
+    std.debug.print("Lisp VM REPL — type 'quit' to exit\n", .{});
+
+    while (true) {
+        line_buf.clearRetainingCapacity();
+        std.debug.print("> ", .{});
+
+        var done = false;
+        while (!done) {
+            const n = stdin_file.readAll(&buffer) catch break;
+            if (n == 0) {
+                if (line_buf.items.len > 0) done = true;
+                break;
+            }
+            for (buffer[0..n]) |c| {
+                if (c == '\n' or c == '\r') {
+                    done = true;
+                    break;
+                }
+                line_buf.appendAssumeCapacity(c);
+            }
+        }
+
+        if (line_buf.items.len == 0) continue;
+
+        const input = line_buf.items;
+        var trimmed = input;
+        while (trimmed.len > 0 and (trimmed[0] == ' ' or trimmed[0] == '\t')) trimmed = trimmed[1..];
+        if (std.mem.eql(u8, trimmed, "quit")) break;
+
+        // Tokenize
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        errdefer arena.deinit();
+        var symtab = SymbolTable.init(std.heap.page_allocator, &arena);
+        _ = try symtab.getOrPut("+");
+        _ = try symtab.getOrPut("-");
+        _ = try symtab.getOrPut("*");
+        _ = try symtab.getOrPut("/");
+        _ = try symtab.getOrPut("=");
+        _ = try symtab.getOrPut("<");
+        _ = try symtab.getOrPut(">");
+        _ = try symtab.getOrPut("cons");
+        _ = try symtab.getOrPut("car");
+        _ = try symtab.getOrPut("cdr");
+        _ = try symtab.getOrPut("null?");
+        _ = try symtab.getOrPut("symbol?");
+        _ = try symtab.getOrPut("number?");
+        _ = try symtab.getOrPut("list?");
+        _ = try symtab.getOrPut("length");
+        _ = try symtab.getOrPut("quote");
+        _ = try symtab.getOrPut("if");
+        _ = try symtab.getOrPut("do");
+        _ = try symtab.getOrPut("fn");
+        _ = try symtab.getOrPut("defn");
+        _ = try symtab.getOrPut("def");
+        _ = try symtab.getOrPut("let");
+        _ = try symtab.getOrPut("cond");
+        _ = try symtab.getOrPut("defmacro");
+        _ = try symtab.getOrPut("load");
+        _ = try symtab.getOrPut("print");
+        _ = try symtab.getOrPut("println");
+        _ = try symtab.getOrPut("append");
+        _ = try symtab.getOrPut("reverse");
+        _ = try symtab.getOrPut("member");
+        _ = try symtab.getOrPut("assoc");
+        _ = try symtab.getOrPut("map");
+        _ = try symtab.getOrPut("filter");
+        _ = try symtab.getOrPut("<=");
+
+        var lexer = Lexer.init(input);
+        var tokens_list = std.ArrayList(Token).init(std.heap.page_allocator);
+        errdefer tokens_list.deinit();
+        while (true) {
+            const tok = lexer.nextToken() catch break;
+            if (tok == .eof) break;
+            tokens_list.appendAssumeCapacity(tok);
+        }
+        const tokens = tokens_list.items;
+
+        if (tokens.len == 0) continue;
+
+        // Parse
+        var parser = Parser.init(tokens, &arena, &symtab);
+        var exprs = std.ArrayList(Expr).init(std.heap.page_allocator);
+        errdefer exprs.deinit();
+        while (true) {
+            const expr = parser.parse() catch break;
+            exprs.appendAssumeCapacity(expr);
+            if (expr == Expr.nilExpr()) break;
+        }
+
+        // Eval each expression
+        var i: usize = 0;
+        while (i < exprs.items.len) : (i += 1) {
+            const expr = exprs.items[i];
+            const result = vm.eval(expr, env) catch |err| {
+                std.debug.print("error: {any}\n", .{err});
+                continue;
+            };
+            vm.printValue(result);
+            std.heap.page_allocator.destroy(result);
+        }
+    }
+}
+
+pub fn main() void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    errdefer arena.deinit();
+    var symtab = SymbolTable.init(std.heap.page_allocator, &arena);
+    var env = Environment.init(null, std.heap.page_allocator);
+    defer env.deinit();
+
+    var vm = Vm.init(std.heap.page_allocator, &env);
+    defer vm.deinit();
+
+    // REPL mode
+    replLoop(&vm, &env);
+}
