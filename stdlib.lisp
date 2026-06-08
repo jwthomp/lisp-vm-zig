@@ -14,12 +14,13 @@
 ;; (reverse x) — reverse a list
 (defn reverse-lst
   (fn (x)
-    (let ((acc nil))
-      (if (null? x)
-          acc
-          (do
-            (set-acc! acc (cons (car x) acc))
-            (reverse-lst (cdr x)))))))
+    (reverse-acc x nil)))
+
+(defn reverse-acc
+  (fn (x acc)
+    (if (null? x)
+        acc
+        (reverse-acc (cdr x) (cons (car x) acc)))))
 
 ;; (member x lst) — return sublist starting at first match, nil if not found
 (defn member-lst
