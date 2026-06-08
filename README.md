@@ -68,6 +68,24 @@ Source ──► Lexer ──► []Token ──► Parser ──► Expr (AST)
 2. **`std.fs` unavailable in test harness** — `load` builtin works in REPL but not in tests (Zig 0.16 stdlib limitation).
 3. **`std.debug.print` crashes in test mode** — Forces stdout-based formatting workaround.
 
+
+## Running the VM
+
+### REPL (interactive mode)
+```bash
+zig build run           # Start interactive REPL
+./zig-out/bin/lisp-vm   # Or run the built binary directly
+```
+
+Type Lisp expressions at the `> ` prompt. Type `quit` to exit.
+
+### File mode (TBD)
+```bash
+zig build run -- examples/fibonacci.lisp
+```
+
+File mode requires Zig 0.16 stdin API integration (tracked as issue lisp-vm-zig-007).
+
 ## Issue Tracking
 
 Issues are tracked via [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`). The SQLite database lives in `.beads/` and is gitignored for local dev state.
