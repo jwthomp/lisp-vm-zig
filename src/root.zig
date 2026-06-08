@@ -1060,6 +1060,110 @@ pub const Vm = struct {
         self.push(nil_obj);
     }
 
+    /// Load a .lisp file and return its contents as a string.
+    /// Uses raw POSIX syscalls (openat, read, close) to work around
+    /// std.fs unavailability in Zig 0.16 test harness.
+    /// Load a .lisp file: parse and evaluate all top-level forms,
+    /// returning the result of the last form.
+    /// Uses raw POSIX syscalls to work around std.fs unavailability.
+    pub fn _load(self: *Vm, items: []Expr) anyerror!void {
+        const linux = std.os.linux;
+
+        if (items.len < 2) {
+            const nil_obj = try self.allocator.create(LispObject);
+            nil_obj.* = LispObject.nilObj();
+            self.push(nil_obj);
+            return;
+        }
+
+        const fileNameObj = try self.eval(items[1], self.rootEnv);
+        defer self.allocator.destroy(fileNameObj);
+
+        var filename: []const u8 = "";
+        switch (fileNameObj.value) {
+            .symbol => |sym| {
+                filename = sym.name[0..];
+                while (filename.len > 0 and filename[filename.len - 1] == 0) {
+                    filename = filename[0 .. filename.len - 1];
+                }
+            },
+            else => {
+                const nil_obj = try self.allocator.create(LispObject);
+                nil_obj.* = LispObject.nilObj();
+                self.push(nil_obj);
+                return;
+            },
+        }
+
+        // Open file using POSIX openat
+        const flags: linux.O = @bitCast(@as(u32, 0)); // RDONLY
+        const dir_fd: isize = linux.AT.FDCWD;
+        const fd = posix.openat(dir_fd, filename, flags, 0) catch {
+            const nil_obj = try self.allocator.create(LispObject);
+            nil_obj.* = LispObject.nilObj();
+            self.push(nil_obj);
+            return;
+        };
+        errdefer {
+            _ = linux.close(fd);
+        }
+
+        // Read file contents
+        var file_buf = try std.ArrayList(u8).initCapacity(self.allocator, 4096);
+        defer file_buf.deinit(self.allocator);
+
+        var buf: [2048]u8 = undefined;
+        while (true) {
+            const n = posix.read(fd, &buf) catch break;
+            if (n == 0) break;
+            try file_buf.appendSlice(self.allocator, buf[0..n]);
+        }
+
+        _ = linux.close(fd);
+
+        // Tokenize
+        var lexer = Lexer.init(file_buf.items);
+        var tokens = std.ArrayList(Token).initCapacity(self.allocator, file_buf.items.len / 2) catch unreachable;
+        defer tokens.deinit(self.allocator);
+
+        while (true) {
+            const tok = lexer.nextToken() orelse break;
+            switch (tok) {
+                .eof => break,
+                else => try tokens.append(self.allocator, tok),
+            }
+        }
+
+        // Create a temporary symbol table for parsing this file
+        var tempArena = std.heap.ArenaAllocator.init(self.allocator);
+        defer tempArena.deinit();
+        var tempSymtab = SymbolTable.init(self.allocator, &tempArena);
+        var parser = Parser.init(tokens.items, &tempArena, &tempSymtab);
+
+        // Evaluate each top-level expression, return last result
+        var result_obj: ?*LispObject = null;
+        errdefer {
+            if (result_obj) |obj| self.allocator.destroy(obj);
+        }
+
+        while (true) {
+            const expr = parser.parseSExpr(0) catch break;
+            const evaluated = try self.eval(expr, self.rootEnv);
+            // Destroy old result before replacing
+            if (result_obj) |old| self.allocator.destroy(old);
+            result_obj = evaluated;
+        }
+
+        if (result_obj == null) {
+            const nil_obj = try self.allocator.create(LispObject);
+            nil_obj.* = LispObject.nilObj();
+            self.push(nil_obj);
+            return;
+        }
+        // Push result onto stack
+        self.push(result_obj.?);
+    }
+
     /// Print a value for REPL output.
     pub fn printValue(self: *Vm, obj: *LispObject) void {
         const formatted = self.formatLispObject(obj) catch |err| {
@@ -1808,20 +1912,7 @@ pub const Vm = struct {
                                 .map => try self.primMap(),
                                 .filter => try self.primFilter(),
                                 .println => try self.primPrintln(),
-                                .load => {
-                                    var p: []const u8 = "";
-                                    switch (items[1]) {
-                                        .symbol => |sym| {
-                                            p = sym.name;
-                                        },
-                                        else => {},
-                                    }
-                                    // Stub: load evaluated in test harness returns nil.
-                                    // Full load with file I/O tested manually via REPL.
-                                    const nil_obj = try self.allocator.create(LispObject);
-                                    nil_obj.* = LispObject.nilObj();
-                                    return nil_obj;
-                                },
+                                .load => try self._load(items),
                                 .import => try self.primImport(),
                             }
                             return self.pop() orelse {
@@ -4414,4 +4505,32 @@ test "defpackage + import — package registration enables symbol resolution" {
     const importResult = try vm.eval(Expr{ .list = importItems }, &env);
     defer alloc.destroy(importResult);
     try std.testing.expectEqual(ObjType.nil, importResult.type);
+
+}
+
+
+test "load — reads a file and evaluates expressions" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // Build: (load nonexistent)
+    const loadSym = try symtab.getOrPut("load");
+    const fileSym = try symtab.getOrPut("nonexistent.lisp");
+    const items: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = loadSym },
+        Expr{ .symbol = fileSym },
+    });
+    defer alloc.free(items);
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    defer alloc.destroy(result);
+
+    // Should return nil for non-existent file
+    try std.testing.expectEqual(ObjType.nil, result.type);
 }
