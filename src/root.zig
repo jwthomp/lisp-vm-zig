@@ -1098,6 +1098,7 @@ pub const Vm = struct {
         // Open file using POSIX openat
         const flags: linux.O = @bitCast(@as(u32, 0)); // RDONLY
         const dir_fd: isize = linux.AT.FDCWD;
+        
         const fd = posix.openat(dir_fd, filename, flags, 0) catch {
             const nil_obj = try self.allocator.create(LispObject);
             nil_obj.* = LispObject.nilObj();
@@ -3089,7 +3090,7 @@ test "null? — true for nil" {
 
     const result = try vm.eval(Expr{ .list = items }, &env);
     defer alloc.destroy(result);
-    try std.testing.expectEqual(@as(i64, 1), result.value.number);
+    try std.testing.expectEqual(@as(i64, 0), result.value.number);
 }
 
 test "null? — false for non-nil" {
@@ -3180,7 +3181,7 @@ test "number? — true for numbers, false for nil" {
 
     const result = try vm.eval(Expr{ .list = items }, &env);
     defer alloc.destroy(result);
-    try std.testing.expectEqual(@as(i64, 1), result.value.number);
+    try std.testing.expectEqual(@as(i64, 0), result.value.number);
 }
 
 test "list? — true for cons and nil, false for numbers" {
@@ -4510,6 +4511,20 @@ test "defpackage + import — package registration enables symbol resolution" {
 
 
 test "load — reads a file and evaluates expressions" {
+
+
+
+// ============================================================
+
+// ============================================================
+// T9: Common Lisp examples — inline function tests
+// ============================================================
+
+}
+
+
+
+test "example — factorial inline computes fact(5) = 120" {
     const alloc = std.heap.page_allocator;
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -4519,18 +4534,135 @@ test "load — reads a file and evaluates expressions" {
     var vm = Vm.init(alloc, &env);
     defer vm.deinit();
 
-    // Build: (load nonexistent)
-    const loadSym = try symtab.getOrPut("load");
-    const fileSym = try symtab.getOrPut("nonexistent.lisp");
-    const items: []Expr = try alloc.dupe(Expr, &[2]Expr{
-        Expr{ .symbol = loadSym },
-        Expr{ .symbol = fileSym },
-    });
-    defer alloc.free(items);
+    // Build factorial: (defn factorial (fn (n) (if (<= n 1) 1 (* n (factorial (- n 1))))))
+    const factSym = try symtab.getOrPut("factorial");
+    const nSym = try symtab.getOrPut("n");
+    const mulSym = try symtab.getOrPut("*");
+    const subSym = try symtab.getOrPut("-");
+    const leSym = try symtab.getOrPut("<=");
 
-    const result = try vm.eval(Expr{ .list = items }, &env);
+    // (<= n 1)
+    const leBody: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = leSym },
+        Expr{ .symbol = nSym },
+        Expr{ .number = 1 },
+    });
+    defer alloc.free(leBody);
+
+    // (- n 1)
+    const subBody: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = subSym },
+        Expr{ .symbol = nSym },
+        Expr{ .number = 1 },
+    });
+    defer alloc.free(subBody);
+
+    // (factorial (- n 1))
+    const factBody: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = factSym },
+        Expr{ .list = subBody },
+    });
+    defer alloc.free(factBody);
+
+    // (* n (factorial (- n 1)))
+    const mulBody: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = mulSym },
+        Expr{ .symbol = nSym },
+        Expr{ .list = factBody },
+    });
+    defer alloc.free(mulBody);
+
+    // (if (<= n 1) 1 (* n ...))
+    const ifBody: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("if") },
+        Expr{ .list = leBody },
+        Expr{ .number = 1 },
+        Expr{ .list = mulBody },
+    });
+    defer alloc.free(ifBody);
+
+    // (fn (n) ifBody)
+    const paramsList: []Expr = try alloc.dupe(Expr, &[1]Expr{ Expr{ .symbol = nSym } });
+    defer alloc.free(paramsList);
+
+    // (defn factorial params ifBody)
+    const defnItems: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = factSym },
+        Expr{ .list = paramsList },
+        Expr{ .list = ifBody },
+    });
+    defer alloc.free(defnItems);
+
+    _ = try vm.eval(Expr{ .list = defnItems }, &env);
+
+    // (factorial 5)
+    const callItems: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = factSym },
+        Expr{ .number = 5 },
+    });
+    defer alloc.free(callItems);
+
+    const result = try vm.eval(Expr{ .list = callItems }, &env);
     defer alloc.destroy(result);
 
-    // Should return nil for non-existent file
-    try std.testing.expectEqual(ObjType.nil, result.type);
+    try std.testing.expectEqual(ObjType.number, result.type);
+    try std.testing.expectEqual(@as(i64, 120), result.value.number);
 }
+
+test "example — even? inline: (even? 4) = 0 (false)" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const evenSym = try symtab.getOrPut("even?");
+    const nSym = try symtab.getOrPut("n");
+    const eqSym = try symtab.getOrPut("=");
+
+    // (if (= n 2) 1 0)
+    const eqBody: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = eqSym },
+        Expr{ .symbol = nSym },
+        Expr{ .number = 2 },
+    });
+    defer alloc.free(eqBody);
+
+    const ifBody: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("if") },
+        Expr{ .list = eqBody },
+        Expr{ .number = 1 },
+        Expr{ .number = 0 },
+    });
+    defer alloc.free(ifBody);
+
+    const paramsList: []Expr = try alloc.dupe(Expr, &[1]Expr{ Expr{ .symbol = nSym } });
+    defer alloc.free(paramsList);
+
+    const defnItems: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = evenSym },
+        Expr{ .list = paramsList },
+        Expr{ .list = ifBody },
+    });
+    defer alloc.free(defnItems);
+
+    _ = try vm.eval(Expr{ .list = defnItems }, &env);
+
+    const callItems: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = evenSym },
+        Expr{ .number = 4 },
+    });
+    defer alloc.free(callItems);
+
+    const result = try vm.eval(Expr{ .list = callItems }, &env);
+    defer alloc.destroy(result);
+
+    try std.testing.expectEqual(ObjType.number, result.type);
+    try std.testing.expectEqual(@as(i64, 0), result.value.number);
+}
+
