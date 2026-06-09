@@ -1,5 +1,5 @@
 ;; Even? predicate — arithmetic check
 ;; Tests: defn, fn, =, rem
 (defn even?
-  (fn (n)
+  (n)
     (= 0 (rem n 2))))

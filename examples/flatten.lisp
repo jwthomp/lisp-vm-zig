@@ -1,7 +1,7 @@
 ;; Flatten nested lists
 ;; Tests: defn, fn, if, null?, list?, car, cdr, cons, recursive, conditional
 (defn flatten
-  (fn (lst)
+  (lst)
     (if (null? lst)
         nil
         (if (list? (car lst))

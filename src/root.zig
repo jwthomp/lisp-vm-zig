@@ -106,7 +106,8 @@ pub const Lexer = struct {
             return .number;
         }
         if (std.ascii.isAlphabetic(c) or c == '+' or c == '-' or c == '*' or c == '/' or
-            c == '=' or c == '<' or c == '>' or c == '_' or c == '!' or c == '?' or c == '$')
+            c == '=' or c == '<' or c == '>' or c == '_' or c == '!' or c == '?' or c == '$' or
+            c == '.')
         {
             const sym_start = self.pos;
             self.pos += 1;
