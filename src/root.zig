@@ -347,7 +347,7 @@ pub const LispObject = struct {
 
 /// Builtin dispatch enum — avoids function pointer circular references.
 pub const BuiltinKind = enum {
-    add, sub, mul, div, eq, lt, gt, le, ge,
+    add, sub, mul, div, eq, lt, gt, le, ge, rem,
     cons, car, cdr,
     print,
     null, symbol, number, list,
@@ -457,6 +457,7 @@ pub const Vm = struct {
         vm._registerBuiltin(">", .gt);
         vm._registerBuiltin("<=", .le);
         vm._registerBuiltin(">=", .ge);
+        vm._registerBuiltin("rem", .rem);
         vm._registerBuiltin("cons", .cons);
         vm._registerBuiltin("car", .car);
         vm._registerBuiltin("cdr", .cdr);
@@ -472,7 +473,7 @@ pub const Vm = struct {
         vm._registerBuiltin("assoc", .assoc);
         vm._registerBuiltin("map", .map);
         vm._registerBuiltin("filter", .filter);
-                vm._registerBuiltin("println", .println);
+        vm._registerBuiltin("println", .println);
         vm._registerBuiltin("load", .load);
         vm._registerBuiltin("import", .import);
 
@@ -561,6 +562,16 @@ pub const Vm = struct {
         if (right.value.number == 0) return error.DivisionByZero;
         const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
         result.* = LispObject.numberObj(@divTrunc(left.value.number, right.value.number));
+        self.push(result);
+    }
+
+    pub fn primRem(self: *Vm) !void {
+        const right = self.pop() orelse return error.StackUnderflow;
+        const left = self.pop() orelse return error.StackUnderflow;
+        if (left.type != .number or right.type != .number) return error.TypeError;
+        if (right.value.number == 0) return error.DivisionByZero;
+        const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
+        result.* = LispObject.numberObj(@mod(left.value.number, right.value.number));
         self.push(result);
     }
 
@@ -2028,11 +2039,13 @@ pub const Vm = struct {
                                 .sub => try self.primSub(),
                                 .mul => try self.primMul(),
                                 .div => try self.primDiv(),
+                                .rem => try self.primRem(),
                                 .eq => try self.primEq(),
                                 .lt => try self.primLt(),
                                 .gt => try self.primGt(),
                                 .le => try self.primLe(),
-                                .ge => try self.primGe(),                                .cons => try self.primCons(),
+                                .ge => try self.primGe(),
+                                .cons => try self.primCons(),
                                 .car => try self.primCar(),
                                 .cdr => try self.primCdr(),
                                 .print => try self.primPrint(),
@@ -2083,6 +2096,9 @@ pub const Vm = struct {
         if (std.mem.eql(u8, name, "=")) return try self.primEq();
         if (std.mem.eql(u8, name, "<")) return try self.primLt();
         if (std.mem.eql(u8, name, ">")) return try self.primGt();
+        if (std.mem.eql(u8, name, "<=")) return try self.primLe();
+        if (std.mem.eql(u8, name, ">=")) return try self.primGe();
+        if (std.mem.eql(u8, name, "rem")) return try self.primRem();
         if (std.mem.eql(u8, name, "cons")) return try self.primCons();
         if (std.mem.eql(u8, name, "car")) return try self.primCar();
         if (std.mem.eql(u8, name, "cdr")) return try self.primCdr();

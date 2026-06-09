@@ -869,7 +869,7 @@ All tasks complete. 89/89 tests passing.
 
 ## Known Bugs / Open Issues
 
-1. **Recursive self-call crash** — Closures that call themselves by name (e.g. `fib`) crash with ABRT. The closure lookup via env does not resolve to the closure when the function name matches a symbol in scope.
+1. **Resolved: Recursive self-call** — Fixed in commit fixing sqhn-001. Closures now correctly resolve their own names via the parent environment chain (`childEnv → cl.env → rootEnv`). All recursive examples work: `factorial`, `fibonacci`, `flatten`, `quicksort`, `append-lst`, `max-list`.
 2. **`load` I/O limited** — `std.fs` unavailable in Zig 0.16 test runner; `posix.openat` fails with absolute paths. Works in REPL only with `std.fs.cwd`.
 3. **`std.debug.print` crashes in test mode** — Cannot use `std.debug.print` in Zig 0.16 test harness; forces stdout-based formatting workaround.
 
