@@ -1,0 +1,10 @@
+# === Build artifacts ===
+.zig-cache/
+zig-out/
+zig-out.*
+*.zig-cache
+
+# === Compiled binary (platform-specific) ===
+lisp_vm
+lisp-vm
+lisp_vm.*
