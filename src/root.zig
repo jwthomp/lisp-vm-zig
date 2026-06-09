@@ -4859,14 +4859,195 @@ pub fn replLoop(vm: *Vm, env: *Environment) void {
     }
 }
 
-pub fn main() void {
+/// === CLI Argument Parsing & Help ===
+
+const version = "0.1.0";
+
+fn printHelp(program: []const u8) void {
+    debugPrint(
+        "Usage: {s} [OPTIONS] [FILE]\n" ++
+        "A minimal Lisp bytecode VM.\n" ++
+        "Options:\n" ++
+        "  -h, --help       Show this help message\n" ++
+        "  -v, --version    Show version\n" ++
+        "  -f, --file FILE  Load and execute a Lisp source file\n" ++
+        "\nExamples:\n" ++
+        "  {s}                  Start interactive REPL\n" ++
+        "  {s} --help           Show help\n" ++
+        "  {s} -f program.lisp  Run a Lisp file\n\n",
+        .{program, program, program, program}
+    );
+}
+
+
+/// Load and evaluate a Lisp source file. Returns true on success, false on error.
+fn loadAndEvalFile(vm: *Vm, env: *Environment, filename: []const u8) bool {
+    var file_buf = std.ArrayList(u8).initCapacity(std.heap.page_allocator, 4096) catch unreachable;
+    defer file_buf.deinit(std.heap.page_allocator);
+
+    // Read file contents using POSIX syscalls (std.fs unavailable)
+    const c_filename = vm.allocator.dupeZ(u8, filename) catch {
+        debugPrint("Error: could not allocate filename\n", .{});
+        return false;
+    };
+    defer vm.allocator.free(c_filename);
+
+    const flags: os.linux.O = .{ .ACCMODE = .RDONLY };
+    const fd = posix.openatZ(posix.AT.FDCWD, c_filename, flags, 0) catch {
+        debugPrint("Error: could not open {s}\n", .{filename});
+        return false;
+    };
+    defer _ = os.linux.close(fd);
+
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = posix.read(fd, &buf) catch break;
+        if (n == 0) break;
+        file_buf.appendSlice(std.heap.page_allocator, buf[0..n]) catch unreachable;
+    }
+
+    // Tokenize
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(std.heap.page_allocator, &arena);
+
+    // Initialize symbol table with all known symbols (same as REPL)
+    const initSymbols: []const []const u8 = &[_][]const u8{
+        "+", "-", "*", "/", "=", "<", ">",
+        "cons", "car", "cdr", "null?", "symbol?", "number?", "list?",
+        "length", "quote", "if", "do", "fn", "defn", "def", "let",
+        "cond", "defmacro", "load", "print", "println",
+        "append", "reverse", "member", "assoc", "map", "filter",
+        "<=", ">=",
+    };
+    for (initSymbols) |s| {
+        _ = symtab.getOrPut(s) catch unreachable;
+    }
+
+    var lexer = Lexer.init(file_buf.items);
+    var tokens_list = std.ArrayList(Token).initCapacity(std.heap.page_allocator, 16) catch unreachable;
+    errdefer tokens_list.deinit(std.heap.page_allocator);
+    var texts_list = std.ArrayList([]const u8).initCapacity(std.heap.page_allocator, 16) catch unreachable;
+    errdefer texts_list.deinit(std.heap.page_allocator);
+
+    while (true) {
+        const tok = lexer.nextToken() orelse break;
+        if (tok == .eof) break;
+        tokens_list.append(std.heap.page_allocator, tok) catch unreachable;
+        texts_list.append(std.heap.page_allocator, lexer.current_text) catch unreachable;
+    }
+    const tokens = tokens_list.items;
+    const texts = texts_list.items;
+
+    if (tokens.len == 0) return true; // empty file is OK
+
+    // Build null-separated text buffer
+    var total_len: usize = 0;
+    for (texts) |t| { total_len += t.len + 1; }
+    const all_texts = vm.allocator.alloc(u8, total_len) catch unreachable;
+    errdefer vm.allocator.free(all_texts);
+    var ti: usize = 0;
+    for (texts) |t| {
+        @memcpy(all_texts[ti .. ti + t.len], t);
+        ti += t.len;
+        all_texts[ti] = 0;
+        ti += 1;
+    }
+
+    // Parse
+    var parser = Parser.init(tokens, all_texts, &arena, &symtab);
+    var exprs = std.ArrayList(Expr).initCapacity(std.heap.page_allocator, 16) catch unreachable;
+    errdefer exprs.deinit(std.heap.page_allocator);
+
+    while (true) {
+        const expr = parser.parse() catch break;
+        switch (expr) {
+            .nil => break,
+            else => {},
+        }
+        exprs.append(std.heap.page_allocator, expr) catch unreachable;
+    }
+
+    // Eval each expression
+    var i: usize = 0;
+    while (i < exprs.items.len) : (i += 1) {
+        const expr = exprs.items[i];
+        const result = vm.eval(expr, env) catch |err| {
+            debugPrint("error in {s}: {any}\n", .{ filename, err });
+            continue;
+        };
+        vm.printValue(result);
+    }
+
+    return true;
+}
+
+pub fn main(init: std.process.Init.Minimal) void {
     if (@import("builtin").is_test) return;
+
     var env = Environment.init(null, std.heap.page_allocator);
     defer env.deinit();
 
     var vm = Vm.init(std.heap.page_allocator, &env);
     defer vm.deinit();
 
-    // REPL mode
+    // Parse command-line arguments
+    var args = std.process.Args.iterate(init.args);
+    const progName = args.next() orelse "lisp-vm";
+
+    defer args.deinit();
+    var file_list = std.ArrayList([]const u8).initCapacity(std.heap.page_allocator, 8) catch unreachable;
+    defer file_list.deinit(std.heap.page_allocator);
+
+    var has_positional = false;
+
+    while (args.next()) |arg| {
+        // --help / -h — short-circuit, always process last
+        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            printHelp(progName);
+            std.process.exit(0);
+        }
+
+        // --version / -v — short-circuit
+        if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--version")) {
+            debugPrint("lisp-vm {s}\n", .{version});
+            std.process.exit(0);
+        }
+
+        // -f / --file FILE — load and execute a Lisp source file
+        if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--file")) {
+            const fname = args.next() orelse {
+                debugPrint("Error: -f requires a filename\n", .{});
+                std.process.exit(1);
+            };
+            file_list.append(std.heap.page_allocator, fname) catch unreachable;
+            continue;
+        }
+
+        // Unknown flag (starts with -)
+        if (std.mem.startsWith(u8, arg, "-")) {
+            debugPrint("Unknown option: {s}\n", .{arg});
+            debugPrint("Use --help for usage\n", .{});
+            std.process.exit(1);
+        }
+
+        // Positional file argument
+        if (has_positional) {
+            debugPrint("Error: multiple positional files — use -f for each\n", .{});
+            std.process.exit(1);
+        }
+        file_list.append(std.heap.page_allocator, arg) catch unreachable;
+        has_positional = true;
+    }
+
+    // Execute all files in order
+    var i: usize = 0;
+    while (i < file_list.items.len) : (i += 1) {
+        if (!loadAndEvalFile(&vm, &env, file_list.items[i])) {
+            std.process.exit(1);
+        }
+    }
+
+    // REPL mode (default if no files specified, or after all files processed)
     replLoop(&vm, &env);
 }
