@@ -4851,7 +4851,10 @@ pub fn replLoop(vm: *Vm, env: *Environment) void {
                 continue;
             };
             vm.printValue(result);
-            std.heap.page_allocator.destroy(result);
+            // NOTE: Do NOT destroy result here. Values created by evalDef/evalDefn
+            // are stored in rootEnv and shared. Destroying them causes use-after-free.
+            // Memory leaks in the REPL are acceptable for now.
+            // std.heap.page_allocator.destroy(result);
         }
     }
 }
