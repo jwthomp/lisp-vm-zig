@@ -378,12 +378,14 @@ pub const Closure = struct {
 pub const Environment = struct {
     parent: ?*Environment,
     arena: std.heap.ArenaAllocator,
+    allocator: Allocator,
     bindings: std.StringHashMap(*LispObject),
 
     pub fn init(parent: ?*Environment, allocator: Allocator) Environment {
         return Environment{
             .parent = parent,
             .arena = std.heap.ArenaAllocator.init(allocator),
+            .allocator = allocator,
             .bindings = std.StringHashMap(*LispObject).init(allocator),
         };
     }
@@ -406,7 +408,10 @@ pub const Environment = struct {
 
     /// Bind a value in the current frame.
     pub fn bind(self: *Environment, name: []const u8, val: *LispObject) !void {
-        try self.bindings.put(name, val);
+        const key = try self.allocator.dupeZ(u8, name);
+        errdefer self.allocator.free(key);
+        try self.bindings.put(key, val);
+        
     }
 
     /// Create a child environment with one binding.
