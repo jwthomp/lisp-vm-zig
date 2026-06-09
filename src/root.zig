@@ -1630,7 +1630,7 @@ pub const Vm = struct {
         }
 
         // Duplicate body (survives this frame — Exprs are arena-allocated)
-        const body = try self.allocator.dupe(Expr, bodyExprs);
+        const body = try self.deepCopyExprList(bodyExprs);
 
         // Create closure
         const closure = try self.allocator.create(Closure);
@@ -1649,6 +1649,26 @@ pub const Vm = struct {
             .next = null,
         };
         return obj;
+    }
+
+    /// Deep copy an Expr list to page_allocator. Handles nested lists.
+    pub fn deepCopyExprList(self: *Vm, exprs: []Expr) ![]Expr {
+        const copy = try self.allocator.alloc(Expr, exprs.len);
+        var i: usize = 0;
+        while (i < exprs.len) {
+            const e = exprs[i];
+            switch (e) {
+                .nil => copy[i] = Expr.nilExpr(),
+                .number => |n| copy[i] = Expr{ .number = n },
+                .symbol => |s| copy[i] = Expr{ .symbol = s },
+                .list => |items| {
+                    const nested = try self.deepCopyExprList(items);
+                    copy[i] = Expr{ .list = nested };
+                },
+            }
+            i += 1;
+        }
+        return copy;
     }
 
     /// (defn name (params...) body...) — sugar for (def name (fn params body...)).
