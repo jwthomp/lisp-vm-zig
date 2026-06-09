@@ -536,11 +536,11 @@ pub const Vm = struct {
     }
 
     pub fn primSub(self: *Vm) !void {
-        const a = self.pop() orelse return error.StackUnderflow;
-        const b = self.pop() orelse return error.StackUnderflow;
-        if (a.type != .number or b.type != .number) return error.TypeError;
+        const right = self.pop() orelse return error.StackUnderflow;
+        const left = self.pop() orelse return error.StackUnderflow;
+        if (left.type != .number or right.type != .number) return error.TypeError;
         const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
-        result.* = LispObject.numberObj(a.value.number - b.value.number);
+        result.* = LispObject.numberObj(left.value.number - right.value.number);
         self.push(result);
     }
 
@@ -554,12 +554,12 @@ pub const Vm = struct {
     }
 
     pub fn primDiv(self: *Vm) !void {
-        const a = self.pop() orelse return error.StackUnderflow;
-        const b = self.pop() orelse return error.StackUnderflow;
-        if (a.type != .number or b.type != .number) return error.TypeError;
-        if (b.value.number == 0) return error.DivisionByZero;
+        const right = self.pop() orelse return error.StackUnderflow;
+        const left = self.pop() orelse return error.StackUnderflow;
+        if (left.type != .number or right.type != .number) return error.TypeError;
+        if (right.value.number == 0) return error.DivisionByZero;
         const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
-        result.* = LispObject.numberObj(@divTrunc(a.value.number, b.value.number));
+        result.* = LispObject.numberObj(@divTrunc(left.value.number, right.value.number));
         self.push(result);
     }
 
@@ -575,44 +575,44 @@ pub const Vm = struct {
     }
 
     pub fn primLt(self: *Vm) !void {
-        const a = self.pop() orelse return error.StackUnderflow;
-        const b = self.pop() orelse return error.StackUnderflow;
+        const right = self.pop() orelse return error.StackUnderflow;
+        const left = self.pop() orelse return error.StackUnderflow;
         const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
-        result.* = if (a.type == .number and b.type == .number)
-            LispObject.numberObj(if (a.value.number < b.value.number) 1 else 0)
+        result.* = if (left.type == .number and right.type == .number)
+            LispObject.numberObj(if (left.value.number < right.value.number) 1 else 0)
         else
             LispObject.numberObj(0);
         self.push(result);
     }
 
     pub fn primGt(self: *Vm) !void {
-        const a = self.pop() orelse return error.StackUnderflow;
-        const b = self.pop() orelse return error.StackUnderflow;
+        const right = self.pop() orelse return error.StackUnderflow;
+        const left = self.pop() orelse return error.StackUnderflow;
         const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
-        result.* = if (a.type == .number and b.type == .number)
-            LispObject.numberObj(if (a.value.number > b.value.number) 1 else 0)
+        result.* = if (left.type == .number and right.type == .number)
+            LispObject.numberObj(if (left.value.number > right.value.number) 1 else 0)
         else
             LispObject.numberObj(0);
         self.push(result);
     }
 
     pub fn primLe(self: *Vm) !void {
-        const a = self.pop() orelse return error.StackUnderflow;
-        const b = self.pop() orelse return error.StackUnderflow;
+        const right = self.pop() orelse return error.StackUnderflow;
+        const left = self.pop() orelse return error.StackUnderflow;
         const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
-        result.* = if (a.type == .number and b.type == .number)
-            LispObject.numberObj(if (a.value.number <= b.value.number) 1 else 0)
+        result.* = if (left.type == .number and right.type == .number)
+            LispObject.numberObj(if (left.value.number <= right.value.number) 1 else 0)
         else
             LispObject.numberObj(0);
         self.push(result);
     }
 
     pub fn primGe(self: *Vm) !void {
-        const a = self.pop() orelse return error.StackUnderflow;
-        const b = self.pop() orelse return error.StackUnderflow;
+        const right = self.pop() orelse return error.StackUnderflow;
+        const left = self.pop() orelse return error.StackUnderflow;
         const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
-        result.* = if (a.type == .number and b.type == .number)
-            LispObject.numberObj(if (a.value.number >= b.value.number) 1 else 0)
+        result.* = if (left.type == .number and right.type == .number)
+            LispObject.numberObj(if (left.value.number >= right.value.number) 1 else 0)
         else
             LispObject.numberObj(0);
         self.push(result);
@@ -2413,8 +2413,8 @@ test "primSub — 10 - 4 = 6" {
     errdefer alloc.destroy(a);
     errdefer alloc.destroy(b);
 
-    vm.push(b);
     vm.push(a);
+    vm.push(b);
     try vm.primSub();
 
     const result = vm.pop();
@@ -2466,8 +2466,8 @@ test "primDiv — 20 / 4 = 5" {
     errdefer alloc.destroy(b);
     errdefer alloc.destroy(a);
 
-    vm.push(b);
     vm.push(a);
+    vm.push(b);
     try vm.primDiv();
 
     const result = vm.pop();
@@ -2538,8 +2538,8 @@ test "primLt — 3 < 7 returns 1" {
     errdefer alloc.destroy(b);
     errdefer alloc.destroy(a);
 
-    vm.push(b);
     vm.push(a);
+    vm.push(b);
     try vm.primLt();
 
     const result = vm.pop();
@@ -2562,8 +2562,8 @@ test "primGt — 7 > 3 returns 1" {
     errdefer alloc.destroy(b);
     errdefer alloc.destroy(a);
 
-    vm.push(b);
     vm.push(a);
+    vm.push(b);
     try vm.primGt();
 
     const result = vm.pop();
