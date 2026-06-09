@@ -77,6 +77,14 @@ pub const Lexer = struct {
                 self.pos += 1;
                 return .right_paren;
             },
+            '[' => {
+                self.pos += 1;
+                return .left_paren;
+            },
+            ']' => {
+                self.pos += 1;
+                return .right_paren;
+            },
             else => {},
         }
         if (c == ';') {
