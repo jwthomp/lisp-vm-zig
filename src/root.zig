@@ -1,6 +1,16 @@
 const std = @import("std");
 const posix = std.posix;
+const os = std.os;
 const Allocator = std.mem.Allocator;
+
+// ============================================================
+// Debug print helper — guards std.debug.print in test mode
+// std.debug.print crashes in Zig 0.16 test binaries (SIGABRT).
+// ============================================================
+fn debugPrint(comptime fmt: []const u8, args: anytype) void {
+    if (@import("builtin").is_test) return;
+    std.debug.print(fmt, args);
+}
 
 // ============================================================
 // Token
@@ -30,10 +40,11 @@ pub const Token = enum(u8) {
 
 pub const Lexer = struct {
     input: []const u8,
+    current_text: []const u8 = "",
     pos: usize,
 
     pub fn init(input: []const u8) Lexer {
-        return Lexer{ .input = input, .pos = 0 };
+        return Lexer{ .input = input, .current_text = "", .pos = 0 };
     }
 
     pub fn skipWhitespace(self: *Lexer) void {
@@ -57,9 +68,16 @@ pub const Lexer = struct {
         self.skipWhitespace();
         if (self.pos >= self.input.len) return .eof;
         const c = self.input[self.pos];
-        if (Token.toToken(c)) |tok| {
-            self.pos += 1;
-            return tok;
+        switch (c) {
+            '(' => {
+                self.pos += 1;
+                return .left_paren;
+            },
+            ')' => {
+                self.pos += 1;
+                return .right_paren;
+            },
+            else => {},
         }
         if (c == ';') {
             self.pos += 1;
@@ -71,15 +89,18 @@ pub const Lexer = struct {
             return .quote;
         }
         if (std.ascii.isDigit(c)) {
+            const num_start = self.pos;
             self.pos += 1;
             while (self.pos < self.input.len and std.ascii.isDigit(self.input[self.pos])) {
                 self.pos += 1;
             }
+            self.current_text = self.input[num_start..self.pos];
             return .number;
         }
         if (std.ascii.isAlphabetic(c) or c == '+' or c == '-' or c == '*' or c == '/' or
             c == '=' or c == '<' or c == '>' or c == '_' or c == '!' or c == '?' or c == '$')
         {
+            const sym_start = self.pos;
             self.pos += 1;
             while (self.pos < self.input.len) {
                 const ch = self.input[self.pos];
@@ -92,6 +113,7 @@ pub const Lexer = struct {
                     break;
                 }
             }
+            self.current_text = self.input[sym_start..self.pos];
             return .symbol;
         }
         return null;
@@ -161,12 +183,13 @@ pub const Expr = union(enum) {
 
 pub const Parser = struct {
     tokens: []Token,
+    token_texts: []const u8,
     pos: usize,
     arena: *std.heap.ArenaAllocator,
     symtab: *SymbolTable,
 
-    pub fn init(tokens: []Token, arena: *std.heap.ArenaAllocator, symtab: *SymbolTable) Parser {
-        return Parser{ .tokens = tokens, .pos = 0, .arena = arena, .symtab = symtab };
+    pub fn init(tokens: []Token, texts: []const u8, arena: *std.heap.ArenaAllocator, symtab: *SymbolTable) Parser {
+        return Parser{ .tokens = tokens, .token_texts = texts, .pos = 0, .arena = arena, .symtab = symtab };
     }
 
     pub fn parse(self: *Parser) !Expr {
@@ -227,11 +250,49 @@ pub const Parser = struct {
 
     fn parseAtom(self: *Parser) !Expr {
         const tok = self.tokens[self.pos - 1];
-        switch (tok) {
-            .number => return Expr.nilExpr(),
-            .symbol => return Expr.nilExpr(),
-            else => return Expr.nilExpr(),
+        const text = self._getTokenText();
+        return switch (tok) {
+            .number => blk: {
+                var n: i64 = 0;
+                var sign: i64 = 1;
+                var s: []const u8 = text;
+                if (s.len > 0 and s[0] == '-') {
+                    sign = -1;
+                    s = s[1..];
+                }
+                for (s) |c| {
+                    if (c >= '0' and c <= '9') n = n * 10 + @as(i64, c - '0');
+                }
+                break :blk Expr{ .number = sign * n };
+            },
+            .symbol => blk: {
+                const sym = try self.symtab.getOrPut(text);
+                break :blk Expr{ .symbol = sym };
+            },
+            else => Expr.nilExpr(),
+        };
+    }
+
+    /// Get the text for the token at index i.
+    /// token_texts contains null-separated strings.
+    fn _getTokenText(self: *Parser) []const u8 {
+        // Walk through token_texts to find the text for token at self.pos - 1
+        var idx: usize = 0;
+        const target_idx: usize = self.pos - 1;
+        var count: usize = 0;
+        while (idx < self.token_texts.len) {
+            // Each token text is null-terminated
+            var end = idx;
+            while (end < self.token_texts.len and self.token_texts[end] != 0) {
+                end += 1;
+            }
+            if (count == target_idx) {
+                return self.token_texts[idx..end];
+            }
+            count += 1;
+            idx = end + 1; // skip NUL
         }
+        return "";
     }
 };
 
@@ -553,7 +614,7 @@ pub const Vm = struct {
     pub fn primPrint(self: *Vm) !void {
         const obj = self.pop() orelse return error.StackUnderflow;
         const formatted = try self.formatLispObject(obj);
-        std.debug.print("{s}\n", .{formatted});
+        debugPrint("{s}\n", .{formatted});
         self.allocator.free(formatted);
         const nil_obj = try self.allocator.create(LispObject);
         nil_obj.* = LispObject.nilObj();
@@ -1016,7 +1077,7 @@ pub const Vm = struct {
             var pos: usize = 0;
             const obj = items[i];
             try self._formatToString(&buf, &pos, obj);
-            std.debug.print("{s}\n", .{buf[0..pos]}); 
+            debugPrint("{s}\n", .{buf[0..pos]}); 
         }
 
         self.allocator.free(items);
@@ -1060,9 +1121,6 @@ pub const Vm = struct {
         self.push(nil_obj);
     }
 
-    /// Load a .lisp file and return its contents as a string.
-    /// Uses raw POSIX syscalls (openat, read, close) to work around
-    /// std.fs unavailability in Zig 0.16 test harness.
     /// Load a .lisp file: parse and evaluate all top-level forms,
     /// returning the result of the last form.
     /// Uses raw POSIX syscalls to work around std.fs unavailability.
@@ -1095,18 +1153,17 @@ pub const Vm = struct {
             },
         }
 
-        // Open file using POSIX openat
-        const flags: linux.O = @bitCast(@as(u32, 0)); // RDONLY
-        const dir_fd: isize = linux.AT.FDCWD;
-        
-        const fd = posix.openat(dir_fd, filename, flags, 0) catch {
+        // Open file using Linux open() — uses linux.O struct (RDONLY by default)
+        const flags: os.linux.O = .{}; // ACCMODE.RDONLY by default
+        const c_filename = try self.allocator.dupeZ(u8, filename);
+        defer self.allocator.free(c_filename);
+        const fd: c_int = @intCast(os.linux.open(c_filename, flags, 0));
+
+        if (fd < 0) {
             const nil_obj = try self.allocator.create(LispObject);
             nil_obj.* = LispObject.nilObj();
             self.push(nil_obj);
             return;
-        };
-        errdefer {
-            _ = linux.close(fd);
         }
 
         // Read file contents
@@ -1124,14 +1181,19 @@ pub const Vm = struct {
 
         // Tokenize
         var lexer = Lexer.init(file_buf.items);
-        var tokens = std.ArrayList(Token).initCapacity(self.allocator, file_buf.items.len / 2) catch unreachable;
-        defer tokens.deinit(self.allocator);
+        var texts_list = std.ArrayList([]const u8).initCapacity(self.allocator, 16) catch unreachable;
+        errdefer texts_list.deinit(self.allocator);
+        var tokens = std.ArrayList(Token).initCapacity(self.allocator, 16) catch unreachable;
+        errdefer tokens.deinit(self.allocator);
 
         while (true) {
             const tok = lexer.nextToken() orelse break;
             switch (tok) {
                 .eof => break,
-                else => try tokens.append(self.allocator, tok),
+                else => {
+                    try tokens.append(self.allocator, tok);
+                    texts_list.append(self.allocator, lexer.current_text) catch unreachable;
+                },
             }
         }
 
@@ -1139,7 +1201,21 @@ pub const Vm = struct {
         var tempArena = std.heap.ArenaAllocator.init(self.allocator);
         defer tempArena.deinit();
         var tempSymtab = SymbolTable.init(self.allocator, &tempArena);
-        var parser = Parser.init(tokens.items, &tempArena, &tempSymtab);
+
+        // Build null-separated text buffer
+        var total_len: usize = 0;
+        for (texts_list.items) |t| { total_len += t.len + 1; }
+        const all_texts = try self.allocator.alloc(u8, total_len);
+        defer self.allocator.free(all_texts);
+        var ti: usize = 0;
+        for (texts_list.items) |t| {
+            @memcpy(all_texts[ti..ti + t.len], t);
+            ti += t.len;
+            all_texts[ti] = 0;
+            ti += 1;
+        }
+
+        var parser = Parser.init(tokens.items, all_texts, &tempArena, &tempSymtab);
 
         // Evaluate each top-level expression, return last result
         var result_obj: ?*LispObject = null;
@@ -1168,10 +1244,10 @@ pub const Vm = struct {
     /// Print a value for REPL output.
     pub fn printValue(self: *Vm, obj: *LispObject) void {
         const formatted = self.formatLispObject(obj) catch |err| {
-            std.debug.print("format error: {any}\n", .{err});
+            debugPrint("format error: {any}\n", .{err});
             return;
         };
-        std.debug.print("{s}\n", .{formatted});
+        debugPrint("{s}\n", .{formatted});
         self.allocator.free(formatted);
     }
 
@@ -1475,7 +1551,7 @@ pub const Vm = struct {
         }
     }
 
-        /// (fn (params...) body...) — create closure object.
+    /// (fn (params...) body...) — create closure object.
     pub fn evalFn(self: *Vm, items: []Expr, env: *Environment) !*LispObject {
         if (items.len < 3) return error.FnRequiresParamsAndBody;
         const paramsExpr = items[1];
@@ -4587,31 +4663,38 @@ test "example — even? inline: (even? 4) = 0 (false)" {
 // ============================================================
 
 pub fn replLoop(vm: *Vm, env: *Environment) void {
-    const stdin_file = std.Io.getStdIn();
     var buffer: [1024]u8 = undefined;
-    var line_buf = std.ArrayListUnmanaged(u8).init(std.heap.page_allocator);
-    defer line_buf.deinit();
+    var line_buf = std.ArrayList(u8).initCapacity(std.heap.page_allocator, 256) catch unreachable;
+    errdefer line_buf.deinit(std.heap.page_allocator);
 
-    std.debug.print("Lisp VM REPL — type 'quit' to exit\n", .{});
+    debugPrint("Lisp VM REPL — type 'quit' to exit\n", .{});
 
-    while (true) {
+    // Read all available input at once (handles piped input correctly)
+    const n = posix.read(posix.STDIN_FILENO, &buffer) catch {
+        return;
+    };
+
+    if (n == 0) return;
+
+    // Split into lines and process each
+    var data_start: usize = 0;
+    while (data_start < n) {
+        var line_end = data_start;
+        while (line_end < n and buffer[line_end] != '\n' and buffer[line_end] != '\r') {
+            line_end += 1;
+        }
+
+        // Copy line to line_buf
         line_buf.clearRetainingCapacity();
-        std.debug.print("> ", .{});
+        var li: usize = data_start;
+        while (li < line_end) {
+            line_buf.append(std.heap.page_allocator, buffer[li]) catch unreachable;
+            li += 1;
+        }
 
-        var done = false;
-        while (!done) {
-            const n = stdin_file.readAll(&buffer) catch break;
-            if (n == 0) {
-                if (line_buf.items.len > 0) done = true;
-                break;
-            }
-            for (buffer[0..n]) |c| {
-                if (c == '\n' or c == '\r') {
-                    done = true;
-                    break;
-                }
-                line_buf.appendAssumeCapacity(c);
-            }
+        data_start = line_end;
+        while (data_start < n and (buffer[data_start] == '\n' or buffer[data_start] == '\r')) {
+            data_start += 1;
         }
 
         if (line_buf.items.len == 0) continue;
@@ -4621,65 +4704,84 @@ pub fn replLoop(vm: *Vm, env: *Environment) void {
         while (trimmed.len > 0 and (trimmed[0] == ' ' or trimmed[0] == '\t')) trimmed = trimmed[1..];
         if (std.mem.eql(u8, trimmed, "quit")) break;
 
+        debugPrint("> ", .{});
+
         // Tokenize
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         errdefer arena.deinit();
         var symtab = SymbolTable.init(std.heap.page_allocator, &arena);
-        _ = try symtab.getOrPut("+");
-        _ = try symtab.getOrPut("-");
-        _ = try symtab.getOrPut("*");
-        _ = try symtab.getOrPut("/");
-        _ = try symtab.getOrPut("=");
-        _ = try symtab.getOrPut("<");
-        _ = try symtab.getOrPut(">");
-        _ = try symtab.getOrPut("cons");
-        _ = try symtab.getOrPut("car");
-        _ = try symtab.getOrPut("cdr");
-        _ = try symtab.getOrPut("null?");
-        _ = try symtab.getOrPut("symbol?");
-        _ = try symtab.getOrPut("number?");
-        _ = try symtab.getOrPut("list?");
-        _ = try symtab.getOrPut("length");
-        _ = try symtab.getOrPut("quote");
-        _ = try symtab.getOrPut("if");
-        _ = try symtab.getOrPut("do");
-        _ = try symtab.getOrPut("fn");
-        _ = try symtab.getOrPut("defn");
-        _ = try symtab.getOrPut("def");
-        _ = try symtab.getOrPut("let");
-        _ = try symtab.getOrPut("cond");
-        _ = try symtab.getOrPut("defmacro");
-        _ = try symtab.getOrPut("load");
-        _ = try symtab.getOrPut("print");
-        _ = try symtab.getOrPut("println");
-        _ = try symtab.getOrPut("append");
-        _ = try symtab.getOrPut("reverse");
-        _ = try symtab.getOrPut("member");
-        _ = try symtab.getOrPut("assoc");
-        _ = try symtab.getOrPut("map");
-        _ = try symtab.getOrPut("filter");
-        _ = try symtab.getOrPut("<=");
+        _ = symtab.getOrPut("+") catch unreachable;
+        _ = symtab.getOrPut("-") catch unreachable;
+        _ = symtab.getOrPut("*") catch unreachable;
+        _ = symtab.getOrPut("/") catch unreachable;
+        _ = symtab.getOrPut("=") catch unreachable;
+        _ = symtab.getOrPut("<") catch unreachable;
+        _ = symtab.getOrPut(">") catch unreachable;
+        _ = symtab.getOrPut("cons") catch unreachable;
+        _ = symtab.getOrPut("car") catch unreachable;
+        _ = symtab.getOrPut("cdr") catch unreachable;
+        _ = symtab.getOrPut("null?") catch unreachable;
+        _ = symtab.getOrPut("symbol?") catch unreachable;
+        _ = symtab.getOrPut("number?") catch unreachable;
+        _ = symtab.getOrPut("list?") catch unreachable;
+        _ = symtab.getOrPut("length") catch unreachable;
+        _ = symtab.getOrPut("quote") catch unreachable;
+        _ = symtab.getOrPut("if") catch unreachable;
+        _ = symtab.getOrPut("do") catch unreachable;
+        _ = symtab.getOrPut("fn") catch unreachable;
+        _ = symtab.getOrPut("defn") catch unreachable;
+        _ = symtab.getOrPut("def") catch unreachable;
+        _ = symtab.getOrPut("let") catch unreachable;
+        _ = symtab.getOrPut("cond") catch unreachable;
+        _ = symtab.getOrPut("defmacro") catch unreachable;
+        _ = symtab.getOrPut("load") catch unreachable;
+        _ = symtab.getOrPut("print") catch unreachable;
+        _ = symtab.getOrPut("println") catch unreachable;
+        _ = symtab.getOrPut("append") catch unreachable;
+        _ = symtab.getOrPut("reverse") catch unreachable;
+        _ = symtab.getOrPut("member") catch unreachable;
+        _ = symtab.getOrPut("assoc") catch unreachable;
+        _ = symtab.getOrPut("map") catch unreachable;
+        _ = symtab.getOrPut("filter") catch unreachable;
+        _ = symtab.getOrPut("<=") catch unreachable;
 
         var lexer = Lexer.init(input);
-        var tokens_list = std.ArrayList(Token).init(std.heap.page_allocator);
-        errdefer tokens_list.deinit();
+        var texts_list = std.ArrayList([]const u8).initCapacity(std.heap.page_allocator, 16) catch unreachable;
+        errdefer texts_list.deinit(std.heap.page_allocator);
+        var tokens_list = std.ArrayList(Token).initCapacity(std.heap.page_allocator, 16) catch unreachable;
+        errdefer tokens_list.deinit(std.heap.page_allocator);
         while (true) {
-            const tok = lexer.nextToken() catch break;
+            const tok = lexer.nextToken() orelse break;
             if (tok == .eof) break;
-            tokens_list.appendAssumeCapacity(tok);
+            tokens_list.append(std.heap.page_allocator, tok) catch unreachable;
+            texts_list.append(std.heap.page_allocator, lexer.current_text) catch unreachable;
         }
         const tokens = tokens_list.items;
+        const texts = texts_list.items;
 
         if (tokens.len == 0) continue;
 
+        // Build null-separated text buffer
+        var total_len: usize = 0;
+        for (texts) |t| { total_len += t.len + 1; }
+        const all_texts = vm.allocator.alloc(u8, total_len) catch unreachable;
+        errdefer vm.allocator.free(all_texts);
+        var ti: usize = 0;
+        for (texts) |t| {
+            @memcpy(all_texts[ti..ti + t.len], t);
+            ti += t.len;
+            all_texts[ti] = 0;
+            ti += 1;
+        }
+
         // Parse
-        var parser = Parser.init(tokens, &arena, &symtab);
-        var exprs = std.ArrayList(Expr).init(std.heap.page_allocator);
-        errdefer exprs.deinit();
+        var parser = Parser.init(tokens, all_texts, &arena, &symtab);
+        var exprs = std.ArrayList(Expr).initCapacity(std.heap.page_allocator, 4) catch unreachable;
+        errdefer exprs.deinit(std.heap.page_allocator);
         while (true) {
             const expr = parser.parse() catch break;
-            exprs.appendAssumeCapacity(expr);
-            if (expr == Expr.nilExpr()) break;
+            switch (expr) { .nil => break, else => {} }
+            exprs.append(std.heap.page_allocator, expr) catch unreachable;
         }
 
         // Eval each expression
@@ -4687,7 +4789,7 @@ pub fn replLoop(vm: *Vm, env: *Environment) void {
         while (i < exprs.items.len) : (i += 1) {
             const expr = exprs.items[i];
             const result = vm.eval(expr, env) catch |err| {
-                std.debug.print("error: {any}\n", .{err});
+                debugPrint("error: {any}\n", .{err});
                 continue;
             };
             vm.printValue(result);
@@ -4697,9 +4799,7 @@ pub fn replLoop(vm: *Vm, env: *Environment) void {
 }
 
 pub fn main() void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    errdefer arena.deinit();
-    var symtab = SymbolTable.init(std.heap.page_allocator, &arena);
+    if (@import("builtin").is_test) return;
     var env = Environment.init(null, std.heap.page_allocator);
     defer env.deinit();
 
