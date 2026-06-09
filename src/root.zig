@@ -1943,17 +1943,17 @@ pub const Vm = struct {
                     var clean: []const u8 = headName[0..];
                     while (clean.len > 0 and clean[clean.len - 1] == 0) clean = clean[0 .. clean.len - 1];
 
-                    // --- Special forms ---
-                    const isDef = clean.len == 3 and clean[0] == 'd' and clean[1] == 'e' and clean[2] == 'f';
-                    const isDefn = clean.len >= 4 and clean[0] == 'd' and clean[1] == 'e' and clean[2] == 'f' and clean[3] == 'n';
-                    const isDo = clean.len >= 2 and clean[0] == 'd' and clean[1] == 'o';
-                    const isFn = clean.len >= 2 and clean[0] == 'f' and clean[1] == 'n';
-                    const isIf = clean.len >= 2 and clean[0] == 'i' and clean[1] == 'f';
-                    const isCond = clean.len >= 4 and clean[0] == 'c' and clean[1] == 'o' and clean[2] == 'n' and clean[3] == 'd';
-                    const isQuote = clean.len >= 5 and clean[0] == 'q' and clean[1] == 'u' and clean[2] == 'o' and clean[3] == 't' and clean[4] == 'e';
-                    const isLet = clean.len >= 3 and clean[0] == 'l' and clean[1] == 'e' and clean[2] == 't';
-                    const isDefmacro = clean.len >= 8 and clean[0] == 'd' and clean[1] == 'e' and clean[2] == 'f' and clean[3] == 'm' and clean[4] == 'a' and clean[5] == 'c' and clean[6] == 'r' and clean[7] == 'o';
-                    const isDefpackage = clean.len >= 9 and clean[0] == 'd' and clean[1] == 'e' and clean[2] == 'f' and clean[3] == 'p' and clean[4] == 'a' and clean[5] == 'c' and clean[6] == 'k' and clean[7] == 'a' and clean[8] == 'g' and clean[9] == 'e';
+                    // --- Special forms (exact match) ---
+                    const isDef = std.mem.eql(u8, clean, "def");
+                    const isDefn = std.mem.eql(u8, clean, "defn");
+                    const isDo = std.mem.eql(u8, clean, "do");
+                    const isFn = std.mem.eql(u8, clean, "fn");
+                    const isIf = std.mem.eql(u8, clean, "if");
+                    const isCond = std.mem.eql(u8, clean, "cond");
+                    const isQuote = std.mem.eql(u8, clean, "quote");
+                    const isLet = std.mem.eql(u8, clean, "let");
+                    const isDefmacro = std.mem.eql(u8, clean, "defmacro");
+                    const isDefpackage = std.mem.eql(u8, clean, "defpackage");
 
                     if (isDef) return try self.evalDef(items);
                     if (isFn) return try self.evalFn(items, env);
