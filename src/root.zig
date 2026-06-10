@@ -4744,40 +4744,38 @@ pub fn replLoop(vm: *Vm, env: *Environment) void {
 
     debugPrint("Lisp VM REPL — type 'quit' to exit\n", .{});
 
-    // Read all available input at once (handles piped input correctly)
-    const n = posix.read(posix.STDIN_FILENO, &buffer) catch {
-        return;
-    };
+    while (true) {
+        // Read one line at a time (blocks on interactive stdin, processes all available on piped)
+        const n = posix.read(posix.STDIN_FILENO, &buffer) catch break;
+        if (n == 0) break;
 
-    if (n == 0) return;
+        // Split into lines and process each
+        var data_start: usize = 0;
+        while (data_start < n) {
+            var line_end = data_start;
+            while (line_end < n and buffer[line_end] != '\n' and buffer[line_end] != '\r') {
+                line_end += 1;
+            }
 
-    // Split into lines and process each
-    var data_start: usize = 0;
-    while (data_start < n) {
-        var line_end = data_start;
-        while (line_end < n and buffer[line_end] != '\n' and buffer[line_end] != '\r') {
-            line_end += 1;
-        }
+            // Copy line to line_buf
+            line_buf.clearRetainingCapacity();
+            var li: usize = data_start;
+            while (li < line_end) {
+                line_buf.append(std.heap.page_allocator, buffer[li]) catch unreachable;
+                li += 1;
+            }
 
-        // Copy line to line_buf
-        line_buf.clearRetainingCapacity();
-        var li: usize = data_start;
-        while (li < line_end) {
-            line_buf.append(std.heap.page_allocator, buffer[li]) catch unreachable;
-            li += 1;
-        }
+            data_start = line_end;
+            while (data_start < n and (buffer[data_start] == '\n' or buffer[data_start] == '\r')) {
+                data_start += 1;
+            }
 
-        data_start = line_end;
-        while (data_start < n and (buffer[data_start] == '\n' or buffer[data_start] == '\r')) {
-            data_start += 1;
-        }
+            if (line_buf.items.len == 0) continue;
 
-        if (line_buf.items.len == 0) continue;
-
-        const input = line_buf.items;
-        var trimmed = input;
-        while (trimmed.len > 0 and (trimmed[0] == ' ' or trimmed[0] == '\t')) trimmed = trimmed[1..];
-        if (std.mem.eql(u8, trimmed, "quit")) break;
+            const input = line_buf.items;
+            var trimmed = input;
+            while (trimmed.len > 0 and (trimmed[0] == ' ' or trimmed[0] == '\t')) trimmed = trimmed[1..];
+            if (std.mem.eql(u8, trimmed, "quit")) return;
 
         debugPrint("> ", .{});
 
@@ -4873,6 +4871,7 @@ pub fn replLoop(vm: *Vm, env: *Environment) void {
             // Memory leaks in the REPL are acceptable for now.
             // std.heap.page_allocator.destroy(result);
         }
+    }
     }
 }
 
