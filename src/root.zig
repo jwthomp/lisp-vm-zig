@@ -316,6 +316,7 @@ pub const ObjType = enum(u8) {
     cons,
     closure,
     builtin,
+    err,
 };
 
 pub const LispObject = struct {
@@ -330,6 +331,7 @@ pub const LispObject = struct {
         cons: *ConsCell,
         closure: *Closure,
         builtin: []const u8,
+        err: []const u8,
     };
 
     pub fn nilObj() LispObject {
@@ -342,6 +344,10 @@ pub const LispObject = struct {
 
     pub fn numberObj(n: i64) LispObject {
         return LispObject{ .type = .number, .value = .{ .number = n }, .next = null };
+    }
+
+    pub fn errorObj(msg: []const u8) LispObject {
+        return LispObject{ .type = .err, .value = .{ .err = msg }, .next = null };
     }
 };
 
@@ -1107,6 +1113,7 @@ pub const Vm = struct {
             },
             .closure => { const s = "#<closure>"; std.mem.copyForwards(u8, buf[pos.*..], s); pos.* += s.len; },
             .builtin => { const s = "#<builtin>"; std.mem.copyForwards(u8, buf[pos.*..], s); pos.* += s.len; },
+            .err => |msg| { std.mem.copyForwards(u8, buf[pos.*..], msg); pos.* += msg.len; },
         }
     }
 
@@ -4906,7 +4913,39 @@ pub fn replLoop(vm: *Vm, env: *Environment) void {
         while (i < exprs.items.len) : (i += 1) {
             const expr = exprs.items[i];
             const result = vm.eval(expr, env) catch |err| {
-                debugPrint("error: {any}\n", .{err});
+                var errMsg: ?[]const u8 = switch (err) {
+                    error.DivisionByZero => "Error: division by zero",
+                    error.TypeError => "Error: type error — expected number argument",
+                    error.StackUnderflow => "Error: stack underflow — not enough arguments",
+                    error.OutOfMemory => "Error: out of memory",
+                    error.DefnRequiresNameParamsAndBody => "Error: defn requires (defn name [params] body...)",
+                    error.DefRequiresSymbolAndValue => "Error: def requires (def name value)",
+                    error.DefpackageRequiresSymbol => "Error: defpackage requires a symbol",
+                    error.ParseError => "Error: parse error",
+                    error.FormatFailed => "Error: format failed",
+                    else => null,
+                };
+                if (errMsg == null) {
+                    var buf: [128]u8 = undefined;
+                    const formatted = std.fmt.bufPrint(&buf, "Error: {s}", .{@errorName(err)}) catch "Error: unknown error";
+                    errMsg = vm.allocator.dupe(u8, formatted) catch {
+                        debugPrint("Error: {s}\n", .{"Error: unknown error"});
+                        continue;
+                    };
+                }
+                const errObj = vm.allocator.create(LispObject) catch {
+                    debugPrint("Error: out of memory\n", .{});
+                    continue;
+                };
+                errObj.* = LispObject.errorObj(errMsg.?);
+                vm.printValue(errObj);
+                // Free the allocated error message (only if it was heap-allocated)
+                if (err != error.DivisionByZero and err != error.TypeError and err != error.StackUnderflow and
+                    err != error.OutOfMemory and err != error.DefnRequiresNameParamsAndBody and
+                    err != error.DefRequiresSymbolAndValue and err != error.DefpackageRequiresSymbol and
+                    err != error.ParseError and err != error.FormatFailed) {
+                    vm.allocator.free(errMsg.?);
+                }
                 continue;
             };
             vm.printValue(result);
