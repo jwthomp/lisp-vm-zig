@@ -1,6 +1,6 @@
 # Change: REPL Multi-Line Evaluation
 
-- **Status**: Proposed
+- **Status**: Archived
 - **Created**: 2026-06-08
 - **Issue**: sqhn-006
 - **Related**: sqhn-005 (REPL Stdin API Migration)

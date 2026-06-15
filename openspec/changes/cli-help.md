@@ -1,6 +1,6 @@
 # Change: CLI Help and Argument Parsing
 
-- **Status**: Proposed
+- **Status**: Archived
 - **Created**: 2026-06-08
 - **Issue**: sqhn-007
 
