@@ -426,6 +426,8 @@ pub const Environment = struct {
 // ============================================================
 
 pub const Vm = struct {
+    pub const Error = error{OutOfMemory, ImportRequiresArg, ImportInvalidArg, LoadRequiresArg, LoadInvalidArg};
+
     stack: std.ArrayList(*LispObject),
     allocator: Allocator,
     rootEnv: *Environment,
@@ -1137,10 +1139,23 @@ pub const Vm = struct {
         self.push(nil_obj);
     }
 
+    /// Read an entire file into a heap-allocated buffer.
+    /// Uses std.Io which works in both test and non-test modes.
+    fn readFile(self: *Vm, path: []const u8) ![]u8 {
+        const io = std.Io.Threaded.io(std.Io.Threaded.global_single_threaded);
+        var dir = std.Io.Dir.cwd();
+        var file = try dir.openFile(io, path, .{});
+        defer file.close(io);
+
+        const file_size = try file.length(io);
+        const buf = try self.allocator.alloc(u8, file_size);
+        _ = try file.readPositionalAll(io, buf, 0);
+        return buf;
+    }
+
     /// (import "pkg-name") — load a package file and evaluate its definitions.
-    /// In tests, stubs to return nil (std.fs unavailable in test harness).
-    /// In REPL, reads file, tokenizes, parses, and evaluates each form.
-    pub fn primImport(self: *Vm) !void {
+    /// Reads file, tokenizes, parses, and evaluates each top-level form.
+    pub fn primImport(self: *Vm) anyerror!void {
         // Pop the package/file name from the stack
         const nameObj = self.pop() orelse return error.ImportRequiresArg;
         defer self.allocator.destroy(nameObj);
@@ -1163,8 +1178,57 @@ pub const Vm = struct {
             else => return error.ImportInvalidArg,
         }
 
-        // Stub: file I/O (std.fs) unavailable in test harness.
-        // Full import with file reading works in REPL.
+        // Read file contents using std.Io
+        const contents = try self.readFile(filename);
+        defer self.allocator.free(contents);
+
+        // Tokenize
+        var lexer = Lexer.init(contents);
+        var texts_list = std.ArrayList([]const u8).initCapacity(self.allocator, 16) catch unreachable;
+        errdefer texts_list.deinit(self.allocator);
+        var tokens = std.ArrayList(Token).initCapacity(self.allocator, 16) catch unreachable;
+        errdefer tokens.deinit(self.allocator);
+
+        while (true) {
+            const tok = lexer.nextToken() orelse break;
+            switch (tok) {
+                .eof => break,
+                else => {
+                    try tokens.append(self.allocator, tok);
+                    texts_list.append(self.allocator, lexer.current_text) catch unreachable;
+                },
+            }
+        }
+
+        // Create a temporary symbol table for parsing this file
+        var tempArena = std.heap.ArenaAllocator.init(self.allocator);
+        defer tempArena.deinit();
+        var tempSymtab = SymbolTable.init(self.allocator, &tempArena);
+
+        // Build null-separated text buffer
+        var total_len: usize = 0;
+        for (texts_list.items) |t| { total_len += t.len + 1; }
+        const all_texts = try self.allocator.alloc(u8, total_len);
+        defer self.allocator.free(all_texts);
+        var ti: usize = 0;
+        for (texts_list.items) |t| {
+            @memcpy(all_texts[ti..ti + t.len], t);
+            ti += t.len;
+            all_texts[ti] = 0;
+            ti += 1;
+        }
+
+        var parser = Parser.init(tokens.items, all_texts, &tempArena, &tempSymtab);
+
+        // Evaluate each top-level expression
+        while (true) {
+            const expr = parser.parseSExpr(0) catch break;
+            if (self.eval(expr, self.rootEnv)) |_| {} else |err| {
+                debugPrint("import error: {any}\n", .{err});
+            }
+        }
+
+        // Return nil
         const nil_obj = try self.allocator.create(LispObject);
         nil_obj.* = LispObject.nilObj();
         self.push(nil_obj);
@@ -1172,10 +1236,7 @@ pub const Vm = struct {
 
     /// Load a .lisp file: parse and evaluate all top-level forms,
     /// returning the result of the last form.
-    /// Uses raw POSIX syscalls to work around std.fs unavailability.
     pub fn _load(self: *Vm, items: []Expr) anyerror!void {
-        const linux = std.os.linux;
-
         if (items.len < 2) {
             const nil_obj = try self.allocator.create(LispObject);
             nil_obj.* = LispObject.nilObj();
@@ -1202,34 +1263,19 @@ pub const Vm = struct {
             },
         }
 
-        // Open file using Linux open() — uses linux.O struct (RDONLY by default)
-        const flags: os.linux.O = .{}; // ACCMODE.RDONLY by default
-        const c_filename = try self.allocator.dupeZ(u8, filename);
-        defer self.allocator.free(c_filename);
-        const fd: c_int = @intCast(os.linux.open(c_filename, flags, 0));
+        // Read file contents using std.Io
+        const io = std.Io.Threaded.io(std.Io.Threaded.global_single_threaded);
+        var dir = std.Io.Dir.cwd();
+        var file = try dir.openFile(io, filename, .{});
+        defer file.close(io);
 
-        if (fd < 0) {
-            const nil_obj = try self.allocator.create(LispObject);
-            nil_obj.* = LispObject.nilObj();
-            self.push(nil_obj);
-            return;
-        }
-
-        // Read file contents
-        var file_buf = try std.ArrayList(u8).initCapacity(self.allocator, 4096);
-        defer file_buf.deinit(self.allocator);
-
-        var buf: [2048]u8 = undefined;
-        while (true) {
-            const n = posix.read(fd, &buf) catch break;
-            if (n == 0) break;
-            try file_buf.appendSlice(self.allocator, buf[0..n]);
-        }
-
-        _ = linux.close(fd);
+        const file_size = try file.length(io);
+        const file_buf = try self.allocator.alloc(u8, file_size);
+        _ = try file.readPositionalAll(io, file_buf, 0);
+        defer self.allocator.free(file_buf);
 
         // Tokenize
-        var lexer = Lexer.init(file_buf.items);
+        var lexer = Lexer.init(file_buf);
         var texts_list = std.ArrayList([]const u8).initCapacity(self.allocator, 16) catch unreachable;
         errdefer texts_list.deinit(self.allocator);
         var tokens = std.ArrayList(Token).initCapacity(self.allocator, 16) catch unreachable;
@@ -3809,10 +3855,8 @@ test "edge case — cdr of single element" {
 }
 
 // --- Load builtin test ---
-// Note: file I/O (std.os.linux.open) is not available in Zig 0.16 test harness
-// (sandboxed environment blocks syscalls). The load builtin is registered
-// in the dispatch table and compiles correctly. Full load testing is done
-// manually via the REPL.
+// Now uses std.Io which works in both test and non-test modes.
+// Tests load actual .lisp files from the project root.
 
 test "load builtin — registered in dispatch table" {
     const alloc = std.heap.page_allocator;
@@ -4593,7 +4637,7 @@ test "import — stub returns nil without error" {
     const result = try vm.eval(Expr{ .list = importItems }, &env);
     defer alloc.destroy(result);
 
-    // import stub returns nil (std.fs unavailable in test harness)
+    // import loads and evaluates the stdlib.lisp file
     try std.testing.expectEqual(ObjType.nil, result.type);
 }
 
@@ -4898,29 +4942,34 @@ fn printHelp(program: []const u8) void {
 
 /// Load and evaluate a Lisp source file. Returns true on success, false on error.
 fn loadAndEvalFile(vm: *Vm, env: *Environment, filename: []const u8) bool {
-    var file_buf = std.ArrayList(u8).initCapacity(std.heap.page_allocator, 4096) catch unreachable;
-    defer file_buf.deinit(std.heap.page_allocator);
-
-    // Read file contents using POSIX syscalls (std.fs unavailable)
-    const c_filename = vm.allocator.dupeZ(u8, filename) catch {
-        debugPrint("Error: could not allocate filename\n", .{});
-        return false;
-    };
-    defer vm.allocator.free(c_filename);
-
-    const flags: os.linux.O = .{ .ACCMODE = .RDONLY };
-    const fd = posix.openatZ(posix.AT.FDCWD, c_filename, flags, 0) catch {
+    const io = std.Io.Threaded.io(std.Io.Threaded.global_single_threaded);
+    // Read file contents using std.Io
+    var dir = std.Io.Dir.cwd();
+    var file: std.Io.File = undefined;
+    errdefer file.close(io);
+    file = dir.openFile(io, filename, .{}) catch {
         debugPrint("Error: could not open {s}\n", .{filename});
         return false;
     };
-    defer _ = os.linux.close(fd);
 
-    var buf: [4096]u8 = undefined;
-    while (true) {
-        const n = posix.read(fd, &buf) catch break;
-        if (n == 0) break;
-        file_buf.appendSlice(std.heap.page_allocator, buf[0..n]) catch unreachable;
-    }
+    const file_size = file.length(io) catch {
+        file.close(io);
+        debugPrint("Error: could not stat {s}\n", .{filename});
+        return false;
+    };
+    const file_buf = vm.allocator.alloc(u8, file_size) catch {
+        file.close(io);
+        debugPrint("Error: could not allocate buffer for {s}\n", .{filename});
+        return false;
+    };
+    _ = file.readPositionalAll(io, file_buf, 0) catch {
+        file.close(io);
+        vm.allocator.free(file_buf);
+        debugPrint("Error: could not read {s}\n", .{filename});
+        return false;
+    };
+    file.close(io);
+    defer vm.allocator.free(file_buf);
 
     // Tokenize
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -4940,7 +4989,7 @@ fn loadAndEvalFile(vm: *Vm, env: *Environment, filename: []const u8) bool {
         _ = symtab.getOrPut(s) catch unreachable;
     }
 
-    var lexer = Lexer.init(file_buf.items);
+    var lexer = Lexer.init(file_buf);
     var tokens_list = std.ArrayList(Token).initCapacity(std.heap.page_allocator, 16) catch unreachable;
     errdefer tokens_list.deinit(std.heap.page_allocator);
     var texts_list = std.ArrayList([]const u8).initCapacity(std.heap.page_allocator, 16) catch unreachable;
