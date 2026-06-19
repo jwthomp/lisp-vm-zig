@@ -323,6 +323,7 @@ pub const LispObject = struct {
     type: ObjType,
     value: ValueUnion,
     next: ?*LispObject,
+    marked: bool,
 
     const ValueUnion = union(ObjType) {
         nil: void,
@@ -335,19 +336,19 @@ pub const LispObject = struct {
     };
 
     pub fn nilObj() LispObject {
-        return LispObject{ .type = .nil, .value = .{ .nil = {} }, .next = null };
+        return LispObject{ .type = .nil, .value = .{ .nil = {} }, .next = null, .marked = false };
     }
 
     pub fn symbolObj(sym: *Symbol) LispObject {
-        return LispObject{ .type = .symbol, .value = .{ .symbol = sym }, .next = null };
+        return LispObject{ .type = .symbol, .value = .{ .symbol = sym }, .next = null, .marked = false };
     }
 
     pub fn numberObj(n: i64) LispObject {
-        return LispObject{ .type = .number, .value = .{ .number = n }, .next = null };
+        return LispObject{ .type = .number, .value = .{ .number = n }, .next = null, .marked = false };
     }
 
     pub fn errorObj(msg: []const u8) LispObject {
-        return LispObject{ .type = .err, .value = .{ .err = msg }, .next = null };
+        return LispObject{ .type = .err, .value = .{ .err = msg }, .next = null, .marked = false };
     }
 };
 
@@ -440,6 +441,7 @@ pub const Vm = struct {
     macroArgs: std.StringHashMap(Expr),
     dispatch_table: *std.StringHashMap(BuiltinKind),
     packageTable: std.StringHashMap([]const u8),
+    gcHeap: std.ArrayList(*LispObject),
 
     pub fn init(allocator: Allocator, env: *Environment) Vm {
         const dt = allocator.create(std.StringHashMap(BuiltinKind)) catch unreachable;
@@ -453,6 +455,7 @@ pub const Vm = struct {
             .macroArgs = std.StringHashMap(Expr).init(allocator),
             .dispatch_table = dt,
             .packageTable = std.StringHashMap([]const u8).init(allocator),
+            .gcHeap = std.ArrayList(*LispObject).initCapacity(allocator, 16) catch unreachable,
         };
 
         // Register all builtins
@@ -496,6 +499,7 @@ pub const Vm = struct {
 
     pub fn deinit(self: *Vm) void {
         self.stack.deinit(self.allocator);
+        self.gcHeap.deinit(self.allocator);
         self.macroArgs.deinit();
         var it = self.dispatch_table.iterator();
         while (it.next()) |entry| {
@@ -508,6 +512,108 @@ pub const Vm = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.packageTable.deinit();
+    }
+
+    /// Register a LispObject on the GC heap for tracking.
+    pub fn gcRegister(self: *Vm, obj: *LispObject) void {
+        if (self.gcHeap.items.len < self.gcHeap.capacity) {
+            self.gcHeap.appendAssumeCapacity(obj);
+        }
+    }
+
+    /// Allocate a LispObject and register it on the GC heap.
+    pub fn gcAlloc(self: *Vm) !*LispObject {
+        const obj = try self.allocator.create(LispObject);
+        obj.* = LispObject.nilObj(); // Initialize with nil
+        self.gcRegister(obj);
+        return obj;
+    }
+
+    /// Mark-and-sweep GC: mark reachable objects, sweep unreachable ones.
+    pub fn gcCollect(self: *Vm) void {
+        // Step 1: Clear all marked flags
+        var i: usize = 0;
+        while (i < self.gcHeap.items.len) : (i += 1) {
+            self.gcHeap.items[i].marked = false;
+        }
+
+        // Step 2: Root scan — mark all objects reachable from stack + rootEnv
+        var si: usize = 0;
+        while (si < self.stack.items.len) : (si += 1) {
+            self._gcMark(self.stack.items[si]);
+        }
+        self._gcMarkEnv(self.rootEnv);
+
+        // Step 3: Sweep — free all unmarked objects
+        var free_list = std.ArrayList(*LispObject).initCapacity(self.allocator, 8) catch unreachable;
+        defer free_list.deinit();
+        i = 0;
+        while (i < self.gcHeap.items.len) : (i += 1) {
+            if (!self.gcHeap.items[i].marked) {
+                free_list.append(self.gcHeap.items[i]) catch {};
+            }
+        }
+
+        // Free unmarked objects
+        i = 0;
+        while (i < free_list.items.len) : (i += 1) {
+            const obj = free_list.items[i];
+            // Free cons cells
+            if (obj.type == .cons) {
+                // Free the cons cell itself (car and cdr are tracked separately)
+                self.allocator.destroy(obj.value.cons);
+            }
+            self.allocator.destroy(obj);
+        }
+
+        // Step 4: Compact gcHeap — keep only marked objects
+        var write_idx: usize = 0;
+        i = 0;
+        while (i < self.gcHeap.items.len) : (i += 1) {
+            if (self.gcHeap.items[i].marked) {
+                self.gcHeap.items[write_idx] = self.gcHeap.items[i];
+                write_idx += 1;
+            }
+        }
+        self.gcHeap.shrinkRetainingCapacity(write_idx);
+    }
+
+    /// Mark an object and all its children recursively.
+    fn _gcMark(self: *Vm, obj: *LispObject) void {
+        if (obj.marked) return; // Already marked
+        obj.marked = true;
+
+        // Mark children based on type
+        switch (obj.value) {
+            .cons => |cell| {
+                self._gcMark(cell.car);
+                self._gcMark(cell.cdr);
+            },
+            .closure => |cl| {
+                // Mark symbols in closure params
+                var pi: usize = 0;
+                while (pi < cl.params.len) : (pi += 1) {
+                    self._gcMarkSymbol(cl.params[pi]);
+                }
+            },
+            else => {}, // nil, number, symbol, builtin, err have no children to mark
+        }
+    }
+
+    /// Mark a symbol (symbols are shared, not freed by GC).
+    fn _gcMarkSymbol(_: *Vm, _sym: *Symbol) void {
+        _ = _sym; // Symbols are in the arena, not on GC heap
+    }
+
+    /// Mark all objects reachable from an environment and its parents.
+    fn _gcMarkEnv(self: *Vm, env: *Environment) void {
+        var it = env.bindings.iterator();
+        while (it.next()) |entry| {
+            self._gcMark(entry.value_ptr.*);
+        }
+        if (env.parent != null) {
+            self._gcMarkEnv(env.parent.?);
+        }
     }
 
     pub fn push(self: *Vm, obj: *LispObject) void {
@@ -542,6 +648,7 @@ pub const Vm = struct {
         }
         const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
         result.* = LispObject.numberObj(a.value.number + b.value.number);
+        self.gcRegister(result);
         self.push(result);
     }
 
@@ -551,6 +658,7 @@ pub const Vm = struct {
         if (left.type != .number or right.type != .number) return error.TypeError;
         const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
         result.* = LispObject.numberObj(left.value.number - right.value.number);
+        self.gcRegister(result);
         self.push(result);
     }
 
@@ -560,6 +668,7 @@ pub const Vm = struct {
         if (a.type != .number or b.type != .number) return error.TypeError;
         const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
         result.* = LispObject.numberObj(a.value.number * b.value.number);
+        self.gcRegister(result);
         self.push(result);
     }
 
@@ -570,6 +679,7 @@ pub const Vm = struct {
         if (right.value.number == 0) return error.DivisionByZero;
         const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
         result.* = LispObject.numberObj(@divTrunc(left.value.number, right.value.number));
+        self.gcRegister(result);
         self.push(result);
     }
 
@@ -580,6 +690,7 @@ pub const Vm = struct {
         if (right.value.number == 0) return error.DivisionByZero;
         const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
         result.* = LispObject.numberObj(@mod(left.value.number, right.value.number));
+        self.gcRegister(result);
         self.push(result);
     }
 
@@ -587,6 +698,7 @@ pub const Vm = struct {
         const b = self.pop() orelse return error.StackUnderflow;
         const a = self.pop() orelse return error.StackUnderflow;
         const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
+        self.gcRegister(result);
         result.* = if (a.type == .number and b.type == .number)
             LispObject.numberObj(if (a.value.number == b.value.number) 1 else 0)
         else
@@ -598,6 +710,7 @@ pub const Vm = struct {
         const right = self.pop() orelse return error.StackUnderflow;
         const left = self.pop() orelse return error.StackUnderflow;
         const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
+        self.gcRegister(result);
         result.* = if (left.type == .number and right.type == .number)
             LispObject.numberObj(if (left.value.number < right.value.number) 1 else 0)
         else
@@ -609,6 +722,7 @@ pub const Vm = struct {
         const right = self.pop() orelse return error.StackUnderflow;
         const left = self.pop() orelse return error.StackUnderflow;
         const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
+        self.gcRegister(result);
         result.* = if (left.type == .number and right.type == .number)
             LispObject.numberObj(if (left.value.number > right.value.number) 1 else 0)
         else
@@ -620,6 +734,7 @@ pub const Vm = struct {
         const right = self.pop() orelse return error.StackUnderflow;
         const left = self.pop() orelse return error.StackUnderflow;
         const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
+        self.gcRegister(result);
         result.* = if (left.type == .number and right.type == .number)
             LispObject.numberObj(if (left.value.number <= right.value.number) 1 else 0)
         else
@@ -631,6 +746,7 @@ pub const Vm = struct {
         const right = self.pop() orelse return error.StackUnderflow;
         const left = self.pop() orelse return error.StackUnderflow;
         const result = self.allocator.create(LispObject) catch return error.OutOfMemory;
+        self.gcRegister(result);
         result.* = if (left.type == .number and right.type == .number)
             LispObject.numberObj(if (left.value.number >= right.value.number) 1 else 0)
         else
@@ -645,10 +761,12 @@ pub const Vm = struct {
         const cell = try self.allocator.create(ConsCell);
         cell.* = ConsCell.init(car, cdr);
         const obj = try self.allocator.create(LispObject);
+        self.gcRegister(obj);
         obj.* = LispObject{
             .type = .cons,
             .value = .{ .cons = cell },
             .next = null,
+            .marked = false,
         };
         self.push(obj);
     }
@@ -674,6 +792,7 @@ pub const Vm = struct {
         debugPrint("{s}\n", .{formatted});
         self.allocator.free(formatted);
         const nil_obj = try self.allocator.create(LispObject);
+        self.gcRegister(nil_obj);
         nil_obj.* = LispObject.nilObj();
         self.push(nil_obj);
     }
@@ -682,6 +801,7 @@ pub const Vm = struct {
     pub fn primNullQ(self: *Vm) !void {
         const obj = self.pop() orelse return error.StackUnderflow;
         const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
         if (obj.type == .nil) {
             result.* = LispObject.numberObj(1);
         } else {
@@ -694,6 +814,7 @@ pub const Vm = struct {
     pub fn primSymbolQ(self: *Vm) !void {
         const obj = self.pop() orelse return error.StackUnderflow;
         const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
         if (obj.type == .symbol) {
             result.* = LispObject.numberObj(1);
         } else {
@@ -706,6 +827,7 @@ pub const Vm = struct {
     pub fn primNumberQ(self: *Vm) !void {
         const obj = self.pop() orelse return error.StackUnderflow;
         const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
         if (obj.type == .number) {
             result.* = LispObject.numberObj(1);
         } else {
@@ -718,6 +840,7 @@ pub const Vm = struct {
     pub fn primListQ(self: *Vm) !void {
         const obj = self.pop() orelse return error.StackUnderflow;
         const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
         if (obj.type == .cons or obj.type == .nil) {
             result.* = LispObject.numberObj(1);
         } else {
@@ -736,6 +859,7 @@ pub const Vm = struct {
             n += 1;
         }
         const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
         result.* = LispObject.numberObj(@intCast(n));
         self.push(result);
     }
@@ -747,6 +871,7 @@ pub const Vm = struct {
 
         // Create a shared nil object for all list terminators
         const nil_obj = try self.allocator.create(LispObject);
+        self.gcRegister(nil_obj);
         nil_obj.* = LispObject.nilObj();
 
         // Collect all list heads
@@ -775,10 +900,12 @@ pub const Vm = struct {
                 const cons_cell = try self.allocator.create(ConsCell);
                 cons_cell.* = ConsCell.init(car, nil_obj);
                 const new_obj = try self.allocator.create(LispObject);
+                self.gcRegister(new_obj);
                 new_obj.* = LispObject{
                     .type = .cons,
                     .value = .{ .cons = cons_cell },
                     .next = null,
+                    .marked = false,
                 };
                 if (result == null) {
                     result = new_obj;
@@ -805,6 +932,7 @@ pub const Vm = struct {
 
         // Create a shared nil object for list terminators
         const nil_obj = try self.allocator.create(LispObject);
+        self.gcRegister(nil_obj);
         nil_obj.* = LispObject.nilObj();
 
         // Collect elements
@@ -828,6 +956,7 @@ pub const Vm = struct {
                 .type = .cons,
                 .value = .{ .cons = cons_cell },
                 .next = null,
+                .marked = false,
             };
             if (result == null) {
                 result = new_obj;
@@ -879,6 +1008,7 @@ pub const Vm = struct {
             self.push(curr);
         } else {
             const nil_obj = try self.allocator.create(LispObject);
+            self.gcRegister(nil_obj);
             nil_obj.* = LispObject.nilObj();
             self.push(nil_obj);
         }
@@ -913,6 +1043,7 @@ pub const Vm = struct {
         }
 
         const nil_obj = try self.allocator.create(LispObject);
+        self.gcRegister(nil_obj);
         nil_obj.* = LispObject.nilObj();
         self.push(nil_obj);
     }
@@ -926,6 +1057,7 @@ pub const Vm = struct {
 
         // Create a shared nil object
         const nil_obj = try self.allocator.create(LispObject);
+        self.gcRegister(nil_obj);
         nil_obj.* = LispObject.nilObj();
 
         var result: ?*LispObject = null;
@@ -965,6 +1097,7 @@ pub const Vm = struct {
                 .type = .cons,
                 .value = .{ .cons = cons_cell },
                 .next = null,
+                .marked = false,
             };
             if (result == null) {
                 result = new_obj;
@@ -992,6 +1125,7 @@ pub const Vm = struct {
 
         // Create a shared nil object
         const nil_obj = try self.allocator.create(LispObject);
+        self.gcRegister(nil_obj);
         nil_obj.* = LispObject.nilObj();
 
         var result: ?*LispObject = null;
@@ -1027,6 +1161,7 @@ pub const Vm = struct {
                     .type = .cons,
                     .value = .{ .cons = cons_cell },
                     .next = null,
+                    .marked = false,
                 };
                 if (result == null) {
                     result = new_obj;
@@ -1142,6 +1277,7 @@ pub const Vm = struct {
 
         // Return nil
         const nil_obj = try self.allocator.create(LispObject);
+        self.gcRegister(nil_obj);
         nil_obj.* = LispObject.nilObj();
         self.push(nil_obj);
     }
@@ -1358,11 +1494,13 @@ pub const Vm = struct {
         switch (expr) {
             .nil => {
                 const obj = try self.allocator.create(LispObject);
+                self.gcRegister(obj);
                 obj.* = LispObject.nilObj();
                 return obj;
             },
             .number => |n| {
                 const obj = try self.allocator.create(LispObject);
+                self.gcRegister(obj);
                 obj.* = LispObject.numberObj(n);
                 return obj;
             },
@@ -1371,6 +1509,7 @@ pub const Vm = struct {
                 if (env.lookup(sym.name)) |v| return v;
                 if (self.rootEnv.lookup(sym.name)) |v| return v;
                 const obj = try self.allocator.create(LispObject);
+                self.gcRegister(obj);
                 obj.* = LispObject.nilObj();
                 return obj;
             },
@@ -1383,21 +1522,25 @@ pub const Vm = struct {
         return switch (expr) {
             .nil => blk: {
                 const o = try self.allocator.create(LispObject);
+                self.gcRegister(o);
                 o.* = LispObject.nilObj();
                 break :blk o;
             },
             .number => |n| blk: {
                 const o = try self.allocator.create(LispObject);
+                self.gcRegister(o);
                 o.* = LispObject.numberObj(n);
                 break :blk o;
             },
             .symbol => blk: {
                 const o = try self.allocator.create(LispObject);
+                self.gcRegister(o);
                 o.* = LispObject.nilObj();
                 break :blk o;
             },
             .list => blk: {
                 const o = try self.allocator.create(LispObject);
+                self.gcRegister(o);
                 o.* = LispObject.nilObj();
                 break :blk o;
             },
@@ -1414,11 +1557,13 @@ pub const Vm = struct {
         const val = switch (items[2]) {
             .number => |n| blk: {
                 const obj = try self.allocator.create(LispObject);
+                self.gcRegister(obj);
                 obj.* = LispObject.numberObj(n);
                 break :blk obj;
             },
             .nil => blk: {
                 const obj = try self.allocator.create(LispObject);
+                self.gcRegister(obj);
                 obj.* = LispObject.nilObj();
                 break :blk obj;
             },
@@ -1432,10 +1577,12 @@ pub const Vm = struct {
     fn _buildConsList(self: *Vm, ast: []Expr) !*LispObject {
         if (ast.len == 0) {
             const obj = try self.allocator.create(LispObject);
+            self.gcRegister(obj);
             obj.* = LispObject.nilObj();
             return obj;
         }
         var tail: *LispObject = try self.allocator.create(LispObject);
+        self.gcRegister(tail);
         tail.* = switch (ast[ast.len - 1]) {
             .nil => LispObject.nilObj(),
             .number => |n| LispObject.numberObj(n),
@@ -1446,26 +1593,31 @@ pub const Vm = struct {
         var i: usize = ast.len - 1;
         while (i > 0) : (i -= 1) {
             const cell = try self.allocator.create(LispObject);
+            self.gcRegister(cell);
             const cons_cell = try self.allocator.create(ConsCell);
 
             const car_val: *LispObject = switch (ast[i - 1]) {
                 .nil => blk: {
                     const o = try self.allocator.create(LispObject);
+                    self.gcRegister(o);
                     o.* = LispObject.nilObj();
                     break :blk o;
                 },
                 .number => |n| blk: {
                     const o = try self.allocator.create(LispObject);
+                    self.gcRegister(o);
                     o.* = LispObject.numberObj(n);
                     break :blk o;
                 },
                 .symbol => blk: {
                     const o = try self.allocator.create(LispObject);
+                    self.gcRegister(o);
                     o.* = LispObject.nilObj();
                     break :blk o;
                 },
                 .list => blk: {
                     const o = try self.allocator.create(LispObject);
+                    self.gcRegister(o);
                     o.* = LispObject.nilObj();
                     break :blk o;
                 },
@@ -1479,6 +1631,7 @@ pub const Vm = struct {
                 .type = .cons,
                 .value = .{ .cons = cons_cell },
                 .next = null,
+                .marked = false,
             };
             tail = cell;
         }
@@ -1494,16 +1647,19 @@ pub const Vm = struct {
         switch (arg) {
             .nil => {
                 const obj = try self.allocator.create(LispObject);
+                self.gcRegister(obj);
                 obj.* = LispObject.nilObj();
                 return obj;
             },
             .number => |n| {
                 const obj = try self.allocator.create(LispObject);
+                self.gcRegister(obj);
                 obj.* = LispObject.numberObj(n);
                 return obj;
             },
             .symbol => |sym| {
                 const obj = try self.allocator.create(LispObject);
+                self.gcRegister(obj);
                 obj.* = LispObject.symbolObj(sym);
                 return obj;
             },
@@ -1518,6 +1674,7 @@ pub const Vm = struct {
     pub fn _evalDo(self: *Vm, items: []Expr, env: *Environment) !*LispObject {
         if (items.len < 2) {
             const obj = try self.allocator.create(LispObject);
+            self.gcRegister(obj);
             obj.* = LispObject.nilObj();
             return obj;
         }
@@ -1546,11 +1703,13 @@ pub const Vm = struct {
         if (taken) {
             if (items.len > 2) return self._evalIfAtom(items[2], env);
             const obj = try self.allocator.create(LispObject);
+            self.gcRegister(obj);
             obj.* = LispObject.nilObj();
             return obj;
         } else {
             if (items.len > 3) return self._evalIfAtom(items[3], env);
             const obj = try self.allocator.create(LispObject);
+            self.gcRegister(obj);
             obj.* = LispObject.nilObj();
             return obj;
         }
@@ -1573,6 +1732,7 @@ pub const Vm = struct {
             i += 2;
         }
         const obj = try self.allocator.create(LispObject);
+        self.gcRegister(obj);
         obj.* = LispObject.nilObj();
         return obj;
     }
@@ -1708,10 +1868,12 @@ pub const Vm = struct {
 
         // Wrap in LispObject
         const obj = try self.allocator.create(LispObject);
+        self.gcRegister(obj);
         obj.* = LispObject{
             .type = .closure,
             .value = .{ .closure = closure },
             .next = null,
+            .marked = false,
         };
         return obj;
     }
@@ -1834,6 +1996,7 @@ pub const Vm = struct {
 
         // Create a nil LispObject to return
         const obj = try self.allocator.create(LispObject);
+        self.gcRegister(obj);
         obj.* = LispObject.nilObj();
         return obj;
     }
@@ -1970,11 +2133,13 @@ pub const Vm = struct {
             switch (current) {
                 .nil => {
                     const obj = try self.allocator.create(LispObject);
+                    self.gcRegister(obj);
                     obj.* = LispObject.nilObj();
                     return obj;
                 },
                 .number => |n| {
                     const obj = try self.allocator.create(LispObject);
+                    self.gcRegister(obj);
                     obj.* = LispObject.numberObj(n);
                     return obj;
                 },
@@ -1990,12 +2155,14 @@ pub const Vm = struct {
                     if (env.lookup(sym.name)) |v| return v;
                     if (self.rootEnv.lookup(sym.name)) |v| return v;
                     const obj = try self.allocator.create(LispObject);
+                    self.gcRegister(obj);
                     obj.* = LispObject.nilObj();
                     return obj;
                 },
                 .list => |items| {
                     if (items.len == 0) {
                         const obj = try self.allocator.create(LispObject);
+                        self.gcRegister(obj);
                         obj.* = LispObject.nilObj();
                         return obj;
                     }
