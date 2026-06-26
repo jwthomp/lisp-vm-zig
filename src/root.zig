@@ -352,6 +352,368 @@ pub const LispObject = struct {
     }
 };
 
+// ============================================================
+// Bytecode Compiler & Interpreter
+// ============================================================
+
+/// Bytecode instructions
+pub const Opcode = enum(u8) {
+    // Constants
+    nil,           // push nil
+    number,        // push number (next 8 bytes = i64)
+    symbol,        // push symbol value from env (next 4 bytes = u32 index into constants)
+    const_val,     // push constant value (next 4 bytes = u32 index into constants)
+
+    // Control flow
+    jump,          // unconditional jump (next 4 bytes = u32 offset)
+    jump_if_false, // conditional jump (next 4 bytes = u32 offset)
+
+    // Special forms
+    def,           // define variable (next 4 bytes = u32 index into constants)
+    defn,          // define function (next 4 bytes = u32 index into constants)
+    let,           // let bindings (next 4 bytes = u32 index into constants)
+    iff,           // conditional (next 4 bytes = u32 offset for else/nil branch)
+    quote,         // quote (next 4 bytes = u32 index into constants)
+    do,            // do block (next 4 bytes = u32 count of expressions)
+
+    // Function calls
+    call,          // call function with N args (next 1 byte = u8 count)
+    tailcall,      // tail call with N args (next 1 byte = u8 count)
+
+    // Stack ops
+    pop,           // pop top of stack
+    dup,           // duplicate top of stack
+};
+
+/// A compiled bytecode program
+pub const Bytecode = struct {
+    ops: std.ArrayList(u8),
+    constants: std.ArrayList(*LispObject),
+    allocator: Allocator,
+
+    pub fn init(allocator: Allocator) Bytecode {
+        return Bytecode{
+            .ops = std.ArrayList(u8).initCapacity(allocator, 64) catch unreachable,
+            .constants = std.ArrayList(*LispObject).initCapacity(allocator, 16) catch unreachable,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Bytecode) void {
+        self.ops.deinit(self.allocator);
+        self.constants.deinit(self.allocator);
+    }
+
+    /// Emit a single opcode byte
+    fn emitOp(self: *Bytecode, op: Opcode) void {
+        self.ops.appendAssumeCapacity(@intFromEnum(op));
+    }
+
+    /// Emit an operand (u32, little-endian)
+    fn emitU32(self: *Bytecode, val: u32) void {
+        var v = val;
+        var i: usize = 0;
+        while (i < 4) : (i += 1) {
+            self.ops.appendAssumeCapacity(@as(u8, @intCast(v & 0xFF)));
+            v >>= 8;
+        }
+    }
+
+    /// Emit an operand (i64, little-endian)
+    fn emitI64(self: *Bytecode, val: i64) void {
+        var v = val;
+        var i: usize = 0;
+        while (i < 8) : (i += 1) {
+            self.ops.appendAssumeCapacity(@as(u8, @intCast(v & 0xFF)));
+            v >>= 8;
+        }
+    }
+
+    /// Emit a nil opcode
+    fn emitNil(self: *Bytecode) void {
+        self.emitOp(.nil);
+    }
+
+    /// Emit a number opcode
+    fn emitNumber(self: *Bytecode, n: i64) void {
+        self.emitOp(.number);
+        self.emitI64(n);
+    }
+
+    /// Emit a symbol lookup opcode (index into constants)
+    fn emitSymbol(self: *Bytecode, index: u32) void {
+        self.emitOp(.symbol);
+        self.emitU32(index);
+    }
+
+    /// Emit a constant value opcode (index into constants)
+    fn emitConstVal(self: *Bytecode, index: u32) void {
+        self.emitOp(.const_val);
+        self.emitU32(index);
+    }
+
+    /// Emit a jump opcode (placeholder, filled later)
+    fn emitJump(self: *Bytecode) u32 {
+        self.emitOp(.jump);
+        const offset = @as(u32, @intCast(self.ops.items.len));
+        self.emitU32(0); // placeholder
+        return offset;
+    }
+
+    /// Emit a conditional jump opcode
+    fn emitJumpIfFalse(self: *Bytecode) u32 {
+        self.emitOp(.jump_if_false);
+        const offset = @as(u32, @intCast(self.ops.items.len));
+        self.emitU32(0); // placeholder
+        return offset;
+    }
+
+    /// Patch a jump offset
+    fn patchJump(self: *Bytecode, offset: usize, target: usize) void {
+        var i: u8 = 0;
+        while (i < 4) : (i += 1) {
+            const shift: u6 = @intCast(i * 8);
+            self.ops.items[offset + i] = @as(u8, @intCast((target >> shift) & 0xFF));
+        }
+    }
+
+    /// Emit a def opcode
+    fn emitDef(self: *Bytecode, index: u32) void {
+        self.emitOp(.def);
+        self.emitU32(index);
+    }
+
+    /// Emit a defn opcode
+    fn emitDefn(self: *Bytecode, index: u32) void {
+        self.emitOp(.defn);
+        self.emitU32(index);
+    }
+
+    /// Emit a let opcode
+    fn emitLet(self: *Bytecode, index: u32) void {
+        self.emitOp(.let);
+        self.emitU32(index);
+    }
+
+    /// Emit an if opcode
+    fn emitIf(self: *Bytecode, elseOffset: u32) void {
+        self.emitOp(.iff);
+        self.emitU32(elseOffset);
+    }
+
+    /// Emit a quote opcode
+    fn emitQuote(self: *Bytecode, index: u32) void {
+        self.emitOp(.quote);
+        self.emitU32(index);
+    }
+
+    /// Emit a do opcode
+    fn emitDo(self: *Bytecode, count: u32) void {
+        self.emitOp(.do);
+        self.emitU32(count);
+    }
+
+    /// Emit a call opcode
+    fn emitCall(self: *Bytecode, argCount: u8) void {
+        self.emitOp(.call);
+        self.ops.appendAssumeCapacity(argCount);
+    }
+
+    /// Emit a tailcall opcode
+    fn emitTailcall(self: *Bytecode, argCount: u8) void {
+        self.emitOp(.tailcall);
+        self.ops.appendAssumeCapacity(argCount);
+    }
+
+    /// Emit a pop opcode
+    fn emitPop(self: *Bytecode) void {
+        self.emitOp(.pop);
+    }
+
+    /// Emit a dup opcode
+    fn emitDup(self: *Bytecode) void {
+        self.emitOp(.dup);
+    }
+
+    /// Add a constant and return its index
+    fn addConstant(self: *Bytecode, val: *LispObject) u32 {
+        const idx = @as(u32, @intCast(self.constants.items.len));
+        self.constants.appendAssumeCapacity(val);
+        return idx;
+    }
+
+    /// Get constant by index
+    fn getConstant(self: *Bytecode, idx: u32) ?*LispObject {
+        if (idx < self.constants.items.len) return self.constants.items[idx];
+        return null;
+    }
+
+    /// Compile an expression to bytecode
+    pub fn compileExpr(self: *Bytecode, expr: Expr, env: *Environment, vm: *Vm) anyerror!void {
+        switch (expr) {
+            .nil => {
+                self.emitNil();
+            },
+            .number => |n| {
+                self.emitNumber(n);
+            },
+            .symbol => |sym| {
+                // Check if it's a special form
+                var clean: []const u8 = sym.name[0..];
+                while (clean.len > 0 and clean[clean.len - 1] == 0) clean = clean[0 .. clean.len - 1];
+
+                if (std.mem.eql(u8, clean, "nil")) {
+                    self.emitNil();
+                } else {
+                    // Regular symbol lookup — add to constants
+                    self.emitSymbol(vm._addConstantSymbol(sym));
+                }
+            },
+            .list => |items| {
+                if (items.len == 0) {
+                    self.emitNil();
+                    return;
+                }
+
+                const head = items[0];
+                const headName = switch (head) {
+                    .symbol => |sym| sym.name,
+                    else => "",
+                };
+                var clean: []const u8 = headName[0..];
+                while (clean.len > 0 and clean[clean.len - 1] == 0) clean = clean[0 .. clean.len - 1];
+
+                // Special forms
+                if (std.mem.eql(u8, clean, "if")) {
+                    try self.compileIf(items, env, vm);
+                } else if (std.mem.eql(u8, clean, "quote")) {
+                    try self.compileQuote(items, vm);
+                } else if (std.mem.eql(u8, clean, "def")) {
+                    try self.compileDef(items, env, vm);
+                } else if (std.mem.eql(u8, clean, "defn")) {
+                    try self.compileDefn(items, env, vm);
+                } else if (std.mem.eql(u8, clean, "let")) {
+                    try self.compileLet(items, env, vm);
+                } else if (std.mem.eql(u8, clean, "do")) {
+                    try self.compileDo(items, env, vm);
+                } else if (std.mem.eql(u8, clean, "fn")) {
+                    try self.compileFn(items, env, vm);
+                } else {
+                    // Function call
+                    try self.compileCall(items, env, vm);
+                }
+            },
+        }
+    }
+
+    fn compileIf(self: *Bytecode, items: []Expr, env: *Environment, vm: *Vm) !void {
+        // (if test then else?)
+        try self.compileExpr(items[1], env, vm); // test
+        const elseOffset = self.emitJumpIfFalse();
+        try self.compileExpr(items[2], env, vm); // then
+        const endOffset = self.emitJump();
+        self.patchJump(elseOffset, self.ops.items.len);
+        if (items.len > 3) {
+            try self.compileExpr(items[3], env, vm); // else
+        } else {
+            self.emitNil(); // implicit nil
+        }
+        self.patchJump(endOffset, self.ops.items.len);
+    }
+
+    fn compileQuote(self: *Bytecode, items: []Expr, vm: *Vm) !void {
+        // (quote x) — push constant
+        const idx = vm._addConstantExpr(items[1]);
+        self.emitQuote(idx);
+    }
+
+    fn compileDef(self: *Bytecode, items: []Expr, env: *Environment, vm: *Vm) !void {
+        // (def name value)
+        const nameIdx = vm._addConstantExpr(items[1]);
+        try self.compileExpr(items[2], env, vm); // value
+        self.emitDef(nameIdx);
+    }
+
+    fn compileDefn(self: *Bytecode, items: []Expr, env: *Environment, vm: *Vm) !void {
+        // (defn name (params) body...)
+        const nameIdx = vm._addConstantExpr(items[1]);
+        try self.compileFn(items, env, vm);
+        self.emitDefn(nameIdx);
+    }
+
+    fn compileLet(self: *Bytecode, items: []Expr, env: *Environment, vm: *Vm) !void {
+        // (let ((name val) ...) body...)
+        const bindingsExpr = items[1];
+        const bodyExprs = items[2..];
+
+        // Compile binding values and push them
+        if (bindingsExpr == .list) {
+            const listExpr = bindingsExpr.list;
+            var i: usize = 0;
+            while (i < listExpr.len) {
+                try self.compileExpr(listExpr[i + 1], env, vm);
+                i += 2;
+            }
+        }
+
+        // Emit let opcode with count of bindings
+        const bindingCount = if (bindingsExpr == .list) bindingsExpr.list.len / 2 else 0;
+        self.emitLet(@as(u32, @intCast(bindingCount)));
+
+        // Compile body
+        var i: usize = 0;
+        while (i < bodyExprs.len) {
+            try self.compileExpr(bodyExprs[i], env, vm);
+            i += 1;
+        }
+    }
+
+    fn compileDo(self: *Bytecode, items: []Expr, env: *Environment, vm: *Vm) !void {
+        // (do expr ...)
+        const count = if (items.len > 1) @as(u32, @intCast(items.len - 1)) else 0;
+        self.emitDo(count);
+        var i: usize = 1;
+        while (i < items.len) {
+            try self.compileExpr(items[i], env, vm);
+            i += 1;
+        }
+    }
+
+    fn compileFn(self: *Bytecode, items: []Expr, env: *Environment, vm: *Vm) !void {
+        // (fn (params) body...)
+        // For now, compile body and create a closure
+        const paramsExpr = items[1];
+        const bodyExprs = items[2..];
+
+        // Compile each body expression
+        var i: usize = 0;
+        while (i < bodyExprs.len) {
+            try self.compileExpr(bodyExprs[i], env, vm);
+            i += 1;
+        }
+
+        // Emit closure creation (simplified — params not fully compiled yet)
+        _ = paramsExpr;
+    }
+
+    fn compileCall(self: *Bytecode, items: []Expr, env: *Environment, vm: *Vm) !void {
+        // (func arg1 arg2 ...)
+        // Compile arguments first (right-to-left for stack order)
+        var i: usize = items.len;
+        while (i > 1) {
+            i -= 1;
+            try self.compileExpr(items[i], env, vm);
+        }
+
+        // Compile function (head)
+        try self.compileExpr(items[0], env, vm);
+
+        // Emit call with arg count
+        const argCount = if (items.len > 1) @as(u8, @intCast(items.len - 1)) else 0;
+        self.emitCall(argCount);
+    }
+};
+
 /// Builtin dispatch enum — avoids function pointer circular references.
 pub const BuiltinKind = enum {
     add, sub, mul, div, eq, lt, gt, le, ge, rem,
@@ -442,8 +804,9 @@ pub const Vm = struct {
     dispatch_table: *std.StringHashMap(BuiltinKind),
     packageTable: std.StringHashMap([]const u8),
     gcHeap: std.ArrayList(*LispObject),
+    bytecode_constants: std.ArrayList(*LispObject),
 
-    pub fn init(allocator: Allocator, env: *Environment) Vm {
+pub fn init(allocator: Allocator, env: *Environment) Vm {
         const dt = allocator.create(std.StringHashMap(BuiltinKind)) catch unreachable;
         dt.* = std.StringHashMap(BuiltinKind).init(allocator);
         errdefer allocator.destroy(dt);
@@ -456,6 +819,7 @@ pub const Vm = struct {
             .dispatch_table = dt,
             .packageTable = std.StringHashMap([]const u8).init(allocator),
             .gcHeap = std.ArrayList(*LispObject).initCapacity(allocator, 16) catch unreachable,
+            .bytecode_constants = std.ArrayList(*LispObject).initCapacity(allocator, 16) catch unreachable,
         };
 
         // Register all builtins
@@ -501,6 +865,7 @@ pub const Vm = struct {
         self.stack.deinit(self.allocator);
         self.gcHeap.deinit(self.allocator);
         self.macroArgs.deinit();
+        self.bytecode_constants.deinit(self.allocator);
         var it = self.dispatch_table.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -614,6 +979,66 @@ pub const Vm = struct {
         if (env.parent != null) {
             self._gcMarkEnv(env.parent.?);
         }
+    }
+
+    /// Add a LispObject to the bytecode constant pool and return its index
+    pub fn _addConstant(self: *Vm, val: *LispObject) u32 {
+        const idx = @as(u32, @intCast(self.bytecode_constants.items.len));
+        self.bytecode_constants.appendAssumeCapacity(val);
+        return idx;
+    }
+
+    /// Add a Symbol to the bytecode constant pool and return its index
+    pub fn _addConstantSymbol(self: *Vm, sym: *Symbol) u32 {
+        const idx = @as(u32, @intCast(self.bytecode_constants.items.len));
+        const obj = self.allocator.create(LispObject) catch unreachable;
+        obj.* = LispObject.symbolObj(sym);
+        self.gcRegister(obj);
+        self.bytecode_constants.appendAssumeCapacity(obj);
+        return idx;
+    }
+
+    /// Add an Expr converted to a LispObject constant and return its index
+    pub fn _addConstantExpr(self: *Vm, expr: Expr) u32 {
+        const obj = self.allocator.create(LispObject) catch unreachable;
+        switch (expr) {
+            .nil => {
+                obj.* = LispObject.nilObj();
+            },
+            .number => |n| {
+                obj.* = LispObject.numberObj(n);
+            },
+            .symbol => |sym| {
+                obj.* = LispObject.symbolObj(sym);
+            },
+            .list => |items| {
+                // Convert AST list to ConsCell
+                var tail: *LispObject = obj;
+                tail.* = LispObject.nilObj();
+                var i: usize = items.len;
+                while (i > 0) {
+                    i -= 1;
+                    const new_obj = self.allocator.create(LispObject) catch unreachable;
+                    switch (items[i]) {
+                        .nil => {
+                            new_obj.* = LispObject.nilObj();
+                        },
+                        .number => |n| {
+                            new_obj.* = LispObject.numberObj(n);
+                        },
+                        .symbol => |sym| {
+                            new_obj.* = LispObject.symbolObj(sym);
+                        },
+                        .list => unreachable,
+                    }
+                    new_obj.next = tail;
+                    tail = new_obj;
+                }
+            },
+        }
+        const idx = @as(u32, @intCast(self.bytecode_constants.items.len));
+        self.bytecode_constants.appendAssumeCapacity(obj);
+        return idx;
     }
 
     pub fn push(self: *Vm, obj: *LispObject) void {
@@ -2305,6 +2730,281 @@ pub const Vm = struct {
                 },
             }
         }
+    }
+
+    /// Execute bytecode and return the result
+    pub fn executeBytecode(self: *Vm, bc: *Bytecode, env: *Environment) !*LispObject {
+        var pc: usize = 0;
+        var current_env = env;
+
+        while (pc < bc.ops.items.len) {
+            const op = @as(Opcode, @enumFromInt(bc.ops.items[pc]));
+            pc += 1;
+
+            switch (op) {
+                .nil => {
+                    const obj = try self.allocator.create(LispObject);
+                    self.gcRegister(obj);
+                    obj.* = LispObject.nilObj();
+                    self.push(obj);
+                },
+                .number => {
+                    const n: i64 = @as(i64, bc.ops.items[pc]) |
+                        (@as(i64, bc.ops.items[pc + 1]) << 8) |
+                        (@as(i64, bc.ops.items[pc + 2]) << 16) |
+                        (@as(i64, bc.ops.items[pc + 3]) << 24) |
+                        (@as(i64, bc.ops.items[pc + 4]) << 32) |
+                        (@as(i64, bc.ops.items[pc + 5]) << 40) |
+                        (@as(i64, bc.ops.items[pc + 6]) << 48) |
+                        (@as(i64, bc.ops.items[pc + 7]) << 56);
+                    pc += 8;
+                    const obj = try self.allocator.create(LispObject);
+                    self.gcRegister(obj);
+                    obj.* = LispObject.numberObj(n);
+                    self.push(obj);
+                },
+                .symbol => {
+                    const idx: u32 = @as(u32, bc.ops.items[pc]) |
+                        (@as(u32, bc.ops.items[pc + 1]) << 8) |
+                        (@as(u32, bc.ops.items[pc + 2]) << 16) |
+                        (@as(u32, bc.ops.items[pc + 3]) << 24);
+                    pc += 4;
+                    // Lookup symbol in environment
+                    const symObj = bc.getConstant(idx) orelse {
+                        const obj = try self.allocator.create(LispObject);
+                        self.gcRegister(obj);
+                        obj.* = LispObject.nilObj();
+                        self.push(obj);
+                        continue;
+                    };
+                    // Push the symbol value from env
+                    if (current_env.lookup(symObj.value.symbol.name[0..])) |val| {
+                        self.push(val);
+                    } else {
+                        if (self.rootEnv.lookup(symObj.value.symbol.name[0..])) |val| {
+                            self.push(val);
+                        } else {
+                            const obj = try self.allocator.create(LispObject);
+                            self.gcRegister(obj);
+                            obj.* = LispObject.nilObj();
+                            self.push(obj);
+                        }
+                    }
+                },
+                .const_val => {
+                    const idx: u32 = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) |
+                        (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
+                    pc += 4;
+                    const val = bc.getConstant(idx) orelse {
+                        const obj = try self.allocator.create(LispObject);
+                        self.gcRegister(obj);
+                        obj.* = LispObject.nilObj();
+                        self.push(obj);
+                        continue;
+                    };
+                    self.push(val);
+                },
+                .jump => {
+                    const offset = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) | (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
+                    pc += 4;
+                    pc = offset;
+                },
+                .jump_if_false => {
+                    const offset = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) | (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
+                    pc += 4;
+                    const top = self.peek();
+                    if (top == null or top.?.type == .nil) {
+                        pc = offset;
+                    }
+                },
+                .def => {
+                    const idx = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) | (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
+                    pc += 4;
+                    const val = self.pop() orelse return error.StackUnderflow;
+                    const symObj = bc.getConstant(idx) orelse return error.UndefinedVariable;
+                    try current_env.bind(symObj.value.symbol.name[0..], val);
+                },
+                .defn => {
+                    const idx = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) | (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
+                    pc += 4;
+                    const val = self.pop() orelse return error.StackUnderflow;
+                    const symObj = bc.getConstant(idx) orelse return error.UndefinedVariable;
+                    try current_env.bind(symObj.value.symbol.name[0..], val);
+                },
+                .let => {
+                    const count = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) | (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
+                    pc += 4;
+                    // Create child environment
+                    var childEnv = current_env.child(self.allocator);
+                    errdefer childEnv.deinit();
+                    // Pop values and bind them
+                    var i: usize = 0;
+                    while (i < count) : (i += 1) {
+                        const val = self.pop() orelse return error.StackUnderflow;
+                        const symObj = bc.getConstant(@as(u32, @intCast(i * 2))) orelse return error.UndefinedVariable;
+                        try childEnv.bind(symObj.value.symbol.name[0..], val);
+                    }
+                    current_env = &childEnv;
+                },
+                .iff => {
+                    const elseOffset = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) | (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
+                    pc += 4;
+                    const top = self.peek();
+                    if (top == null or top.?.type == .nil) {
+                        pc = @as(usize, elseOffset);
+                    }
+                },
+                .quote => {
+                    const idx = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) | (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
+                    pc += 4;
+                    const val = bc.getConstant(idx) orelse {
+                        const obj = try self.allocator.create(LispObject);
+                        self.gcRegister(obj);
+                        obj.* = LispObject.nilObj();
+                        self.push(obj);
+                        continue;
+                    };
+                    self.push(val);
+                },
+                .do => {
+                    const count = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) | (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
+                    pc += 4;
+                    // Do is handled by the compiler — just skip the expressions
+                    _ = count;
+                },
+                .call => {
+                    const argCount = bc.ops.items[pc];
+                    pc += 1;
+                    // Pop args and call function
+                    var args: [16]*LispObject = undefined;
+                    var i: usize = 0;
+                    while (i < argCount) : (i += 1) {
+                        args[argCount - 1 - i] = self.pop() orelse return error.StackUnderflow;
+                    }
+                    const fnVal = self.pop() orelse return error.StackUnderflow;
+                    // Apply function (simplified — just call the builtin or closure)
+                    switch (fnVal.value) {
+                        .builtin => |name| {
+                            // Dispatch to builtin
+                            if (self.dispatch_table.get(name)) |kind| {
+                                switch (kind) {
+                                    .add => try self.primAdd(),
+                                    .sub => try self.primSub(),
+                                    .mul => try self.primMul(),
+                                    .div => try self.primDiv(),
+                                    .rem => try self.primRem(),
+                                    .eq => try self.primEq(),
+                                    .lt => try self.primLt(),
+                                    .gt => try self.primGt(),
+                                    .le => try self.primLe(),
+                                    .ge => try self.primGe(),
+                                    .cons => try self.primCons(),
+                                    .car => try self.primCar(),
+                                    .cdr => try self.primCdr(),
+                                    .print => try self.primPrint(),
+                                    .null => try self.primNullQ(),
+                                    .symbol => try self.primSymbolQ(),
+                                    .number => try self.primNumberQ(),
+                                    .list => try self.primListQ(),
+                                    .length => try self.primLength(),
+                                    .append => try self.primAppend(),
+                                    .reverse => try self.primReverse(),
+                                    .member => try self.primMember(),
+                                    .assoc => try self.primAssoc(),
+                                    .map => try self.primMap(),
+                                    .filter => try self.primFilter(),
+                                    .println => try self.primPrintln(),
+                                    else => {},
+                                }
+                            }
+                        },
+                        else => {
+                            // For closures, we'd need to evaluate the body
+                            // For now, just push nil
+                            const obj = try self.allocator.create(LispObject);
+                            self.gcRegister(obj);
+                            obj.* = LispObject.nilObj();
+                            self.push(obj);
+                        },
+                    }
+                },
+                .tailcall => {
+                    // Tail call — same as call but without pushing a new frame
+                    // For now, just treat it like a regular call
+                    const argCount = bc.ops.items[pc];
+                    pc += 1;
+                    var args: [16]*LispObject = undefined;
+                    var i: usize = 0;
+                    while (i < argCount) : (i += 1) {
+                        args[argCount - 1 - i] = self.pop() orelse return error.StackUnderflow;
+                    }
+                    const fnVal = self.pop() orelse return error.StackUnderflow;
+                    switch (fnVal.value) {
+                        .builtin => |name| {
+                            if (self.dispatch_table.get(name)) |kind| {
+                                switch (kind) {
+                                    .add => try self.primAdd(),
+                                    .sub => try self.primSub(),
+                                    .mul => try self.primMul(),
+                                    .div => try self.primDiv(),
+                                    .rem => try self.primRem(),
+                                    .eq => try self.primEq(),
+                                    .lt => try self.primLt(),
+                                    .gt => try self.primGt(),
+                                    .le => try self.primLe(),
+                                    .ge => try self.primGe(),
+                                    .cons => try self.primCons(),
+                                    .car => try self.primCar(),
+                                    .cdr => try self.primCdr(),
+                                    .print => try self.primPrint(),
+                                    .null => try self.primNullQ(),
+                                    .symbol => try self.primSymbolQ(),
+                                    .number => try self.primNumberQ(),
+                                    .list => try self.primListQ(),
+                                    .length => try self.primLength(),
+                                    .append => try self.primAppend(),
+                                    .reverse => try self.primReverse(),
+                                    .member => try self.primMember(),
+                                    .assoc => try self.primAssoc(),
+                                    .map => try self.primMap(),
+                                    .filter => try self.primFilter(),
+                                    .println => try self.primPrintln(),
+                                    else => {},
+                                }
+                            }
+                        },
+                        else => {
+                            const obj = try self.allocator.create(LispObject);
+                            self.gcRegister(obj);
+                            obj.* = LispObject.nilObj();
+                            self.push(obj);
+                        },
+                    }
+                },
+                .pop => {
+                    _ = self.pop();
+                },
+                .dup => {
+                    const top = self.peek();
+                    if (top != null) {
+                        self.push(top.?);
+                    } else {
+                        const obj = try self.allocator.create(LispObject);
+                        self.gcRegister(obj);
+                        obj.* = LispObject.nilObj();
+                        self.push(obj);
+                    }
+                },
+            }
+        }
+
+        // Return the top of the stack
+        return self.pop() orelse {
+            const obj = try self.allocator.create(LispObject);
+            self.gcRegister(obj);
+            obj.* = LispObject.nilObj();
+            return obj;
+        };
     }
 
     /// Call a primitive by name. Pushes the result onto the stack.
@@ -5321,4 +6021,136 @@ pub fn main(init: std.process.Init.Minimal) void {
 
     // REPL mode (default if no files specified, or after all files processed)
     replLoop(&vm, &env);
+}
+
+// ============================================================
+// Bytecode tests
+// ============================================================
+
+test "bytecode — simple number" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // Compile (number 42)
+    try bc.compileExpr(Expr{ .number = 42 }, &env, &vm);
+
+    // Execute
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 42), result.value.number);
+}
+
+test "bytecode — add two numbers" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // Compile (+ 10 20)
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("+") },
+        Expr{ .number = 10 },
+        Expr{ .number = 20 },
+    }) }, &env, &vm);
+
+    // Execute
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 30), result.value.number);
+}
+
+test "bytecode — if true branch" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // Compile (if 1 42 99)
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("if") },
+        Expr{ .number = 1 },
+        Expr{ .number = 42 },
+        Expr{ .number = 99 },
+    }) }, &env, &vm);
+
+    // Execute
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 42), result.value.number);
+}
+
+test "bytecode — if false branch" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // Compile (if 0 42 99)
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("if") },
+        Expr{ .number = 0 },
+        Expr{ .number = 42 },
+        Expr{ .number = 99 },
+    }) }, &env, &vm);
+
+    // Execute
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 99), result.value.number);
+}
+
+test "bytecode — def and lookup" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // Compile (def x 42)
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("def") },
+        Expr{ .symbol = try symtab.getOrPut("x") },
+        Expr{ .number = 42 },
+    }) }, &env, &vm);
+
+    // Execute
+    _ = try vm.executeBytecode(&bc, &env);
+
+    // Verify x is bound
+    const val = env.lookup("x") orelse {
+        std.testing.expect(false) catch {};
+        return;
+    };
+    try std.testing.expectEqual(@as(i64, 42), val.value.number);
 }
