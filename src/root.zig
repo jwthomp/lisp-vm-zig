@@ -452,6 +452,18 @@ pub const Bytecode = struct {
         self.emitU32(index);
     }
 
+    /// Add a symbol to constants and return its index
+    fn emitConstRef(self: *Bytecode, sym: *Symbol) u32 {
+        const idx = @as(u32, @intCast(self.constants.items.len));
+        std.debug.print("emitConstRef: creating symbol object for '{s}'\n", .{sym.name[0..]});
+        const obj = self.allocator.create(LispObject) catch unreachable;
+        obj.* = LispObject.symbolObj(sym);
+        std.debug.print("emitConstRef: appending to constants, len before={d}, len after={d}\n", .{ idx, idx + 1 });
+        self.constants.appendAssumeCapacity(obj);
+        std.debug.print("emitConstRef: constants.items.len = {d}\n", .{self.constants.items.len});
+        return idx;
+    }
+
     /// Emit a jump opcode (placeholder, filled later)
     fn emitJump(self: *Bytecode) u32 {
         self.emitOp(.jump);
@@ -705,8 +717,35 @@ pub const Bytecode = struct {
             try self.compileExpr(items[i], env, vm);
         }
 
-        // Compile function (head)
-        try self.compileExpr(items[0], env, vm);
+        // Compile function (head) - for symbols that are builtins, emit as builtin reference
+        const head = items[0];
+        std.debug.print("compileCall: head={s}\n", .{
+            switch (head) {
+                .symbol => |sym| sym.name[0..],
+                .number => |n| @as([]const u8, try std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{n})),
+                .nil => "nil",
+                .list => "list",
+            },
+        });
+        switch (head) {
+            .symbol => |sym| {
+                // Check if this is a known builtin via dispatch table
+                var clean: []const u8 = sym.name[0..];
+                while (clean.len > 0 and clean[clean.len - 1] == 0) clean = clean[0 .. clean.len - 1];
+                if (vm.dispatch_table.get(clean)) |_| {
+                    // It's a builtin - add to bytecode constants
+                    const nameIdx = self.emitConstRef(sym);
+                    std.debug.print("emitConstRef: added symbol '{s}' at idx {d}\n", .{ sym.name[0..], nameIdx });
+                    self.emitConstVal(nameIdx);
+                } else {
+                    // Not a builtin — regular symbol lookup
+                    try self.compileExpr(head, env, vm);
+                }
+            },
+            else => {
+                try self.compileExpr(head, env, vm);
+            },
+        }
 
         // Emit call with arg count
         const argCount = if (items.len > 1) @as(u8, @intCast(items.len - 1)) else 0;
@@ -2769,19 +2808,33 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                         (@as(u32, bc.ops.items[pc + 2]) << 16) |
                         (@as(u32, bc.ops.items[pc + 3]) << 24);
                     pc += 4;
-                    // Lookup symbol in environment
+                    // Push the constant value (symbol or builtin reference)
                     const symObj = bc.getConstant(idx) orelse {
+                        std.debug.print("const_val: constant not found at idx {d}\n", .{idx});
                         const obj = try self.allocator.create(LispObject);
                         self.gcRegister(obj);
                         obj.* = LispObject.nilObj();
                         self.push(obj);
                         continue;
                     };
-                    // Push the symbol value from env
-                    if (current_env.lookup(symObj.value.symbol.name[0..])) |val| {
-                        self.push(val);
+                    std.debug.print("const_val: found constant, type={s}\n", .{@tagName(symObj.type)});
+                    // If it's a builtin name, push the builtin object
+                    if (self.dispatch_table.get(symObj.value.symbol.name[0..])) |_| {
+                        std.debug.print("const_val: creating builtin object for '{s}'\n", .{symObj.value.symbol.name[0..]});
+                        const builtinObj = try self.allocator.create(LispObject);
+                        self.gcRegister(builtinObj);
+                        builtinObj.* = LispObject{
+                            .type = .builtin,
+                            .value = .{ .builtin = symObj.value.symbol.name[0..] },
+                            .next = null,
+                            .marked = false,
+                        };
+                        self.push(builtinObj);
                     } else {
-                        if (self.rootEnv.lookup(symObj.value.symbol.name[0..])) |val| {
+                        // Regular symbol — look up in environment
+                        if (current_env.lookup(symObj.value.symbol.name[0..])) |val| {
+                            self.push(val);
+                        } else if (self.rootEnv.lookup(symObj.value.symbol.name[0..])) |val| {
                             self.push(val);
                         } else {
                             const obj = try self.allocator.create(LispObject);
@@ -2795,7 +2848,9 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                     const idx: u32 = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) |
                         (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
                     pc += 4;
+                    std.debug.print("const_val: idx={d}, bc.constants.items.len={d}\n", .{ idx, bc.constants.items.len });
                     const val = bc.getConstant(idx) orelse {
+                        std.debug.print("const_val: constant not found at idx {d}\n", .{idx});
                         const obj = try self.allocator.create(LispObject);
                         self.gcRegister(obj);
                         obj.* = LispObject.nilObj();
@@ -2803,6 +2858,19 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                         continue;
                     };
                     self.push(val);
+                    // Check if it's a builtin name and push builtin object instead
+                    if (self.dispatch_table.get(val.value.symbol.name[0..])) |_| {
+                        _ = self.pop(); // Remove the symbol object
+                        const builtinObj = try self.allocator.create(LispObject);
+                        self.gcRegister(builtinObj);
+                        builtinObj.* = LispObject{
+                            .type = .builtin,
+                            .value = .{ .builtin = val.value.symbol.name[0..] },
+                            .next = null,
+                            .marked = false,
+                        };
+                        self.push(builtinObj);
+                    }
                 },
                 .jump => {
                     const offset = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) | (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
@@ -2873,15 +2941,12 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                     _ = count;
                 },
                 .call => {
-                    const argCount = bc.ops.items[pc];
+                    _ = bc.ops.items[pc]; // argCount
                     pc += 1;
-                    // Pop args and call function
-                    var args: [16]*LispObject = undefined;
-                    var i: usize = 0;
-                    while (i < argCount) : (i += 1) {
-                        args[argCount - 1 - i] = self.pop() orelse return error.StackUnderflow;
-                    }
+                    // Pop args (they're already in correct order on stack)
+                    // Pop function (it's on top of args)
                     const fnVal = self.pop() orelse return error.StackUnderflow;
+                    std.debug.print("CALL: fnVal.type={s}\n", .{@tagName(fnVal.type)});
                     // Apply function (simplified — just call the builtin or closure)
                     switch (fnVal.value) {
                         .builtin => |name| {
