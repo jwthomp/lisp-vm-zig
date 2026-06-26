@@ -641,9 +641,11 @@ pub const Bytecode = struct {
 
     fn compileDef(self: *Bytecode, items: []Expr, env: *Environment, vm: *Vm) !void {
         // (def name value)
-        const nameIdx = vm._addConstantExpr(items[1]);
-        try self.compileExpr(items[2], env, vm); // value
-        self.emitDef(nameIdx);
+        if (items[1] == .symbol) {
+            const nameIdx = self.emitConstRef(items[1].symbol);
+            try self.compileExpr(items[2], env, vm); // value
+            self.emitDef(nameIdx);
+        }
     }
 
     fn compileDefn(self: *Bytecode, items: []Expr, env: *Environment, vm: *Vm) !void {
@@ -6176,10 +6178,10 @@ test "bytecode — if false branch" {
     var bc = Bytecode.init(alloc);
     defer bc.deinit();
 
-    // Compile (if 0 42 99)
+    // Compile (if nil 42 99) — nil is falsey, so should return 99
     try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[4]Expr{
         Expr{ .symbol = try symtab.getOrPut("if") },
-        Expr{ .number = 0 },
+        Expr{ .nil = {} },
         Expr{ .number = 42 },
         Expr{ .number = 99 },
     }) }, &env, &vm);
@@ -6212,8 +6214,8 @@ test "bytecode — def and lookup" {
     // Execute
     _ = try vm.executeBytecode(&bc, &env);
 
-    // Verify x is bound
-    const val = env.lookup("x") orelse {
+    // Verify x is bound in rootEnv
+    const val = vm.rootEnv.lookup("x") orelse {
         std.testing.expect(false) catch {};
         return;
     };
