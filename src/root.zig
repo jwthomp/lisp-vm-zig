@@ -6221,3 +6221,305 @@ test "bytecode — def and lookup" {
     };
     try std.testing.expectEqual(@as(i64, 42), val.value.number);
 }
+
+test "bytecode — mul two numbers" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // Compile (* 6 7)
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("*") },
+        Expr{ .number = 6 },
+        Expr{ .number = 7 },
+    }) }, &env, &vm);
+
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 42), result.value.number);
+}
+
+test "bytecode — nested arithmetic" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // Compile (+ (* 2 3) 4) = 10
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("+") },
+        Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+            Expr{ .symbol = try symtab.getOrPut("*") },
+            Expr{ .number = 2 },
+            Expr{ .number = 3 },
+        }) },
+        Expr{ .number = 4 },
+    }) }, &env, &vm);
+
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 10), result.value.number);
+}
+
+test "bytecode — sub two numbers" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // Compile (- 30 10)
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("-") },
+        Expr{ .number = 30 },
+        Expr{ .number = 10 },
+    }) }, &env, &vm);
+
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 20), result.value.number);
+}
+
+test "bytecode — div two numbers" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // Compile (/ 84 2)
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("/") },
+        Expr{ .number = 84 },
+        Expr{ .number = 2 },
+    }) }, &env, &vm);
+
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 42), result.value.number);
+}
+
+test "bytecode — eq comparison" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // Compile (= 42 42)
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("=") },
+        Expr{ .number = 42 },
+        Expr{ .number = 42 },
+    }) }, &env, &vm);
+
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 1), result.value.number);
+}
+
+test "bytecode — lt comparison" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // Compile (< 5 10)
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("<") },
+        Expr{ .number = 5 },
+        Expr{ .number = 10 },
+    }) }, &env, &vm);
+
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 1), result.value.number);
+}
+
+test "bytecode — gt comparison" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // Compile (> 10 5)
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut(">") },
+        Expr{ .number = 10 },
+        Expr{ .number = 5 },
+    }) }, &env, &vm);
+
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 1), result.value.number);
+}
+
+test "bytecode — let bindings" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // Compile (let [a 10 b 20] (+ a b))
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("let") },
+        Expr{ .list = try alloc.dupe(Expr, &[4]Expr{
+            Expr{ .symbol = try symtab.getOrPut("a") },
+            Expr{ .number = 10 },
+            Expr{ .symbol = try symtab.getOrPut("b") },
+            Expr{ .number = 20 },
+        }) },
+        Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+            Expr{ .symbol = try symtab.getOrPut("+") },
+            Expr{ .symbol = try symtab.getOrPut("a") },
+            Expr{ .symbol = try symtab.getOrPut("b") },
+        }) },
+    }) }, &env, &vm);
+
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 30), result.value.number);
+}
+
+test "bytecode — quote" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // Compile (quote (1 2 3))
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("quote") },
+        Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+            Expr{ .number = 1 },
+            Expr{ .number = 2 },
+            Expr{ .number = 3 },
+        }) },
+    }) }, &env, &vm);
+
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expect(result.type == .cons);
+    try std.testing.expectEqual(@as(i64, 1), result.value.cons.car.value.number);
+}
+
+test "bytecode — do block" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // Compile (do (+ 1 2) (+ 3 4)) — should return last value (7)
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("do") },
+        Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+            Expr{ .symbol = try symtab.getOrPut("+") },
+            Expr{ .number = 1 },
+            Expr{ .number = 2 },
+        }) },
+        Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+            Expr{ .symbol = try symtab.getOrPut("+") },
+            Expr{ .number = 3 },
+            Expr{ .number = 4 },
+        }) },
+    }) }, &env, &vm);
+
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 7), result.value.number);
+}
+
+test "bytecode — defn and call" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // Compile (defn double (x) (* x 2))
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = try symtab.getOrPut("double") },
+        Expr{ .list = try alloc.dupe(Expr, &[1]Expr{
+            Expr{ .symbol = try symtab.getOrPut("x") },
+        }) },
+        Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+            Expr{ .symbol = try symtab.getOrPut("*") },
+            Expr{ .symbol = try symtab.getOrPut("x") },
+            Expr{ .number = 2 },
+        }) },
+    }) }, &env, &vm);
+
+    // Compile (double 21)
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("double") },
+        Expr{ .number = 21 },
+    }) }, &env, &vm);
+
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 42), result.value.number);
+}
