@@ -508,10 +508,11 @@ pub const Bytecode = struct {
         self.emitU32(index);
     }
 
-    /// Emit a let opcode
-    fn emitLet(self: *Bytecode, index: u32) void {
+    /// Emit a let opcode (startIdx, count)
+    fn emitLet(self: *Bytecode, startIdx: u32, count: u32) void {
         self.emitOp(.let);
-        self.emitU32(index);
+        self.emitU32(startIdx);
+        self.emitU32(count);
     }
 
     /// Emit an if opcode
@@ -672,8 +673,11 @@ pub const Bytecode = struct {
         const bindingsExpr = items[1];
         const bodyExprs = items[2..];
 
+        // Capture current constant index before adding binding names
+        const startIdx: u32 = if (bindingsExpr == .list) @intCast(self.constants.items.len) else 0;
+
         // Add binding symbol names to constants before compiling values
-        // so the let handler can find them
+        // so the let handler can find them at known indices
         if (bindingsExpr == .list) {
             const listExpr = bindingsExpr.list;
             var i: usize = 0;
@@ -695,9 +699,9 @@ pub const Bytecode = struct {
             }
         }
 
-        // Emit let opcode with count of bindings
-        const bindingCount = if (bindingsExpr == .list) bindingsExpr.list.len / 2 else 0;
-        self.emitLet(@as(u32, @intCast(bindingCount)));
+        // Emit let opcode with starting constant index and count
+        const bindingCount: u32 = if (bindingsExpr == .list) @intCast(bindingsExpr.list.len / 2) else 0;
+        self.emitLet(startIdx, bindingCount);
 
         // Compile body
         var i: usize = 0;
@@ -3031,16 +3035,17 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                     try current_env.bind(symObj.?.value.symbol.name[0..], val);
                 },
                 .let => {
-                    const count = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) | (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
-                    pc += 4;
+                    const startIdx = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) | (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
+                    const count = @as(u32, bc.ops.items[pc + 4]) | (@as(u32, bc.ops.items[pc + 5]) << 8) | (@as(u32, bc.ops.items[pc + 6]) << 16) | (@as(u32, bc.ops.items[pc + 7]) << 24);
+                    pc += 8;
                     // Create child environment
                     var childEnv = current_env.child(self.allocator);
                     errdefer childEnv.deinit();
-                    // Pop values and bind them
-                    var i: usize = 0;
+                    // Pop values and bind them using the stored constant indices
+                    var i: u32 = 0;
                     while (i < count) : (i += 1) {
                         const val = self.pop() orelse return error.StackUnderflow;
-                        const symObj = bc.getConstant(@intCast(i)) orelse return error.UndefinedVariable;
+                        const symObj = bc.getConstant(startIdx + i) orelse return error.UndefinedVariable;
                         try childEnv.bind(symObj.value.symbol.name[0..], val);
                     }
                     current_env = &childEnv;
@@ -3478,12 +3483,12 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                                             }
                                         },
                                         .let => {
-                                            const count: u32 = @as(u32, bodyOps.items[bodyPc]) |
+                                            const startIdx: u32 = @as(u32, bodyOps.items[bodyPc]) |
                                                 (@as(u32, bodyOps.items[bodyPc + 1]) << 8) |
                                                 (@as(u32, bodyOps.items[bodyPc + 2]) << 16) |
                                                 (@as(u32, bodyOps.items[bodyPc + 3]) << 24);
                                             bodyPc += 4;
-                                            const startIdx: u32 = @as(u32, bodyOps.items[bodyPc]) |
+                                            const count: u32 = @as(u32, bodyOps.items[bodyPc]) |
                                                 (@as(u32, bodyOps.items[bodyPc + 1]) << 8) |
                                                 (@as(u32, bodyOps.items[bodyPc + 2]) << 16) |
                                                 (@as(u32, bodyOps.items[bodyPc + 3]) << 24);
