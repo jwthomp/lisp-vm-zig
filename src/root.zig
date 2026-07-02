@@ -389,17 +389,24 @@ pub const Opcode = enum(u8) {
 pub const Bytecode = struct {
     ops: std.ArrayList(u8),
     constants: std.ArrayList(*LispObject),
+    closure_bodies: std.ArrayList(std.ArrayList(u8)),
     allocator: Allocator,
 
     pub fn init(allocator: Allocator) Bytecode {
         return Bytecode{
             .ops = std.ArrayList(u8).initCapacity(allocator, 64) catch unreachable,
             .constants = std.ArrayList(*LispObject).initCapacity(allocator, 16) catch unreachable,
+            .closure_bodies = std.ArrayList(std.ArrayList(u8)).initCapacity(allocator, 4) catch unreachable,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *Bytecode) void {
+        var i: usize = 0;
+        while (i < self.closure_bodies.items.len) : (i += 1) {
+            self.closure_bodies.items[i].deinit(self.allocator);
+        }
+        self.closure_bodies.deinit(self.allocator);
         self.ops.deinit(self.allocator);
         self.constants.deinit(self.allocator);
     }
@@ -609,7 +616,8 @@ pub const Bytecode = struct {
                 } else if (std.mem.eql(u8, clean, "do")) {
                     try self.compileDo(items, env, vm);
                 } else if (std.mem.eql(u8, clean, "fn")) {
-                    try self.compileFn(items, env, vm);
+                    // (fn (params) body...)
+                    try self.compileFn(items[1], items[2..], env, vm);
                 } else {
                     // Function call
                     try self.compileCall(items, env, vm);
@@ -649,9 +657,13 @@ pub const Bytecode = struct {
     }
 
     fn compileDefn(self: *Bytecode, items: []Expr, env: *Environment, vm: *Vm) !void {
+        std.debug.print("compileDefn: entering, ops.len={d}\n", .{self.ops.items.len});
         // (defn name (params) body...)
         const nameIdx = vm._addConstantExpr(items[1]);
-        try self.compileFn(items, env, vm);
+        std.debug.print("compileDefn: nameIdx={d}, ops.len={d}\n", .{nameIdx, self.ops.items.len});
+        const paramsExpr = items[2];
+        const bodyExprs = items[3..];
+        try self.compileFn(paramsExpr, bodyExprs, env, vm);
         self.emitDefn(nameIdx);
     }
 
@@ -659,6 +671,19 @@ pub const Bytecode = struct {
         // (let ((name val) ...) body...)
         const bindingsExpr = items[1];
         const bodyExprs = items[2..];
+
+        // Add binding symbol names to constants before compiling values
+        // so the let handler can find them
+        if (bindingsExpr == .list) {
+            const listExpr = bindingsExpr.list;
+            var i: usize = 0;
+            while (i < listExpr.len) {
+                if (listExpr[i] == .symbol) {
+                    _ = self.emitConstRef(listExpr[i].symbol);
+                }
+                i += 1;
+            }
+        }
 
         // Compile binding values and push them
         if (bindingsExpr == .list) {
@@ -693,30 +718,91 @@ pub const Bytecode = struct {
         }
     }
 
-    fn compileFn(self: *Bytecode, items: []Expr, env: *Environment, vm: *Vm) !void {
-        // (fn (params) body...)
-        // For now, compile body and create a closure
-        const paramsExpr = items[1];
-        const bodyExprs = items[2..];
+    fn compileFn(self: *Bytecode, paramsExpr: Expr, bodyExprs: []Expr, env: *Environment, vm: *Vm) !void {
+        // Compile body into a separate bytecode array
 
-        // Compile each body expression
+        // Note current position and body index
+        const bodyStartIdx: u32 = @intCast(self.closure_bodies.items.len);
+        const opsStart: usize = self.ops.items.len;
+
+        // Compile each body expression into self.ops
         var i: usize = 0;
         while (i < bodyExprs.len) {
             try self.compileExpr(bodyExprs[i], env, vm);
             i += 1;
         }
 
-        // Emit closure creation (simplified — params not fully compiled yet)
-        _ = paramsExpr;
+        // Copy body bytes into closure_bodies, then truncate self.ops
+        // so body opcodes don't execute inline in the main stream
+        const bodyLen = self.ops.items.len - opsStart;
+        const bodyBytes = try self.allocator.alloc(u8, bodyLen);
+        @memcpy(bodyBytes, self.ops.items[opsStart..]);
+        self.closure_bodies.appendAssumeCapacity(std.ArrayList(u8).fromOwnedSlice(bodyBytes));
+        self.ops.shrinkRetainingCapacity(opsStart);
+
+        // Create param name chain for closure
+        var paramChain: ?*LispObject = null;
+        if (paramsExpr == .list) {
+            var pi: usize = paramsExpr.list.len;
+            while (pi > 0) {
+                pi -= 1;
+                const param = paramsExpr.list[pi];
+                if (param == .symbol) {
+                    const paramObj = try self.allocator.create(LispObject);
+                    vm.gcRegister(paramObj);
+                    paramObj.* = LispObject.symbolObj(param.symbol);
+                    paramObj.next = paramChain;
+                    paramChain = paramObj;
+                }
+            }
+        }
+
+        // Create closure object: next -> bodyIdx, next.next -> paramChain
+        const bodyIdxObj = try self.allocator.create(LispObject);
+        vm.gcRegister(bodyIdxObj);
+        bodyIdxObj.* = LispObject.numberObj(@as(i64, bodyStartIdx));
+        if (paramChain) |pc| {
+            bodyIdxObj.next = pc;
+        }
+
+        // Create a Closure struct with params, body, and env
+        const closure = try self.allocator.create(Closure);
+        closure.* = Closure{
+            .params = if (paramsExpr == .list) blk: {
+                var syms: [16]*Symbol = undefined;
+                var count: usize = 0;
+                for (paramsExpr.list) |p| {
+                    if (p == .symbol and count < 16) {
+                        syms[count] = p.symbol;
+                        count += 1;
+                    }
+                }
+                break :blk syms[0..count];
+            } else &[_]*Symbol{},
+            .body = bodyExprs,
+            .env = env,
+            .is_macro = false,
+        };
+
+        const clObj = try self.allocator.create(LispObject);
+        vm.gcRegister(clObj);
+        clObj.* = LispObject{
+            .type = .closure,
+            .value = .{ .closure = closure },
+            .next = bodyIdxObj,
+            .marked = false,
+        };
+        vm.push(clObj);
     }
 
     fn compileCall(self: *Bytecode, items: []Expr, env: *Environment, vm: *Vm) !void {
         // (func arg1 arg2 ...)
         // Compile arguments first (right-to-left for stack order)
-        var i: usize = items.len;
-        while (i > 1) {
-            i -= 1;
+        // Compile arguments left-to-right so the first arg is at the bottom of the stack
+        var i: usize = 1;
+        while (i < items.len) {
             try self.compileExpr(items[i], env, vm);
+            i += 1;
         }
 
         // Compile function (head) - for symbols that are builtins, emit as builtin reference
@@ -1053,27 +1139,57 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                 obj.* = LispObject.symbolObj(sym);
             },
             .list => |items| {
-                // Convert AST list to ConsCell
-                var tail: *LispObject = obj;
-                tail.* = LispObject.nilObj();
-                var i: usize = items.len;
-                while (i > 0) {
-                    i -= 1;
-                    const new_obj = self.allocator.create(LispObject) catch unreachable;
-                    switch (items[i]) {
-                        .nil => {
-                            new_obj.* = LispObject.nilObj();
-                        },
-                        .number => |n| {
-                            new_obj.* = LispObject.numberObj(n);
-                        },
-                        .symbol => |sym| {
-                            new_obj.* = LispObject.symbolObj(sym);
-                        },
-                        .list => unreachable,
+                // Convert AST list to a ConsCell chain, returning a LispObject of type .cons
+                if (items.len == 0) {
+                    obj.* = LispObject.nilObj();
+                } else {
+                    // Build from bottom (end of list) up
+                    var tail: *LispObject = obj;
+                    tail.* = LispObject.nilObj();
+                    var i: usize = items.len;
+                    while (i > 0) {
+                        i -= 1;
+                        const cell_obj = self.allocator.create(LispObject) catch unreachable;
+                        self.gcRegister(cell_obj);
+                        const cell = self.allocator.create(ConsCell) catch unreachable;
+
+                        const car_val: *LispObject = switch (items[i]) {
+                            .nil => blk: {
+                                const o = self.allocator.create(LispObject) catch unreachable;
+                                self.gcRegister(o);
+                                o.* = LispObject.nilObj();
+                                break :blk o;
+                            },
+                            .number => |n| blk: {
+                                const o = self.allocator.create(LispObject) catch unreachable;
+                                self.gcRegister(o);
+                                o.* = LispObject.numberObj(n);
+                                break :blk o;
+                            },
+                            .symbol => blk: {
+                                const o = self.allocator.create(LispObject) catch unreachable;
+                                self.gcRegister(o);
+                                o.* = LispObject.nilObj();
+                                break :blk o;
+                            },
+                            .list => blk: {
+                                const o = self.allocator.create(LispObject) catch unreachable;
+                                self.gcRegister(o);
+                                o.* = LispObject.nilObj();
+                                break :blk o;
+                            },
+                        };
+
+                        cell.* = ConsCell.init(car_val, tail);
+                        cell_obj.* = LispObject{
+                            .type = .cons,
+                            .value = .{ .cons = cell },
+                            .next = tail,
+                            .marked = false,
+                        };
+                        tail = cell_obj;
                     }
-                    new_obj.next = tail;
-                    tail = new_obj;
+                    obj.* = tail.*;
                 }
             },
         }
@@ -2811,32 +2927,37 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                         (@as(u32, bc.ops.items[pc + 3]) << 24);
                     pc += 4;
                     // Push the constant value (symbol or builtin reference)
-                    const symObj = bc.getConstant(idx) orelse {
+                    // Look up in vm.bytecode_constants (used by compileExpr for symbol lookups)
+                    const symObj = if (idx < self.bytecode_constants.items.len)
+                        self.bytecode_constants.items[idx]
+                    else
+                        bc.getConstant(idx);
+                    if (symObj == null) {
                         std.debug.print("const_val: constant not found at idx {d}\n", .{idx});
                         const obj = try self.allocator.create(LispObject);
                         self.gcRegister(obj);
                         obj.* = LispObject.nilObj();
                         self.push(obj);
                         continue;
-                    };
-                    std.debug.print("const_val: found constant, type={s}\n", .{@tagName(symObj.type)});
+                    }
+                    std.debug.print("const_val: found constant, type={s}\n", .{@tagName(symObj.?.type)});
                     // If it's a builtin name, push the builtin object
-                    if (self.dispatch_table.get(symObj.value.symbol.name[0..])) |_| {
-                        std.debug.print("const_val: creating builtin object for '{s}'\n", .{symObj.value.symbol.name[0..]});
+                    if (self.dispatch_table.get(symObj.?.value.symbol.name[0..])) |_| {
+                        std.debug.print("const_val: creating builtin object for '{s}'\n", .{symObj.?.value.symbol.name[0..]});
                         const builtinObj = try self.allocator.create(LispObject);
                         self.gcRegister(builtinObj);
                         builtinObj.* = LispObject{
                             .type = .builtin,
-                            .value = .{ .builtin = symObj.value.symbol.name[0..] },
+                            .value = .{ .builtin = symObj.?.value.symbol.name[0..] },
                             .next = null,
                             .marked = false,
                         };
                         self.push(builtinObj);
                     } else {
                         // Regular symbol — look up in environment
-                        if (current_env.lookup(symObj.value.symbol.name[0..])) |val| {
+                        if (current_env.lookup(symObj.?.value.symbol.name[0..])) |val| {
                             self.push(val);
-                        } else if (self.rootEnv.lookup(symObj.value.symbol.name[0..])) |val| {
+                        } else if (self.rootEnv.lookup(symObj.?.value.symbol.name[0..])) |val| {
                             self.push(val);
                         } else {
                             const obj = try self.allocator.create(LispObject);
@@ -2898,8 +3019,16 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                     const idx = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) | (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
                     pc += 4;
                     const val = self.pop() orelse return error.StackUnderflow;
-                    const symObj = bc.getConstant(idx) orelse return error.UndefinedVariable;
-                    try current_env.bind(symObj.value.symbol.name[0..], val);
+                    const symObj = if (idx < self.bytecode_constants.items.len)
+                        self.bytecode_constants.items[idx]
+                    else
+                        bc.getConstant(idx);
+                    if (symObj == null) return error.UndefinedVariable;
+                    std.debug.print("DEFN: binding {s} = type={s}\n", .{
+                        symObj.?.value.symbol.name[0..],
+                        @tagName(val.type),
+                    });
+                    try current_env.bind(symObj.?.value.symbol.name[0..], val);
                 },
                 .let => {
                     const count = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) | (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
@@ -2911,7 +3040,7 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                     var i: usize = 0;
                     while (i < count) : (i += 1) {
                         const val = self.pop() orelse return error.StackUnderflow;
-                        const symObj = bc.getConstant(@as(u32, @intCast(i * 2))) orelse return error.UndefinedVariable;
+                        const symObj = bc.getConstant(@intCast(i)) orelse return error.UndefinedVariable;
                         try childEnv.bind(symObj.value.symbol.name[0..], val);
                     }
                     current_env = &childEnv;
@@ -2925,16 +3054,20 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                     }
                 },
                 .quote => {
-                    const idx = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) | (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
+                    const idx: usize = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) | (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
                     pc += 4;
-                    const val = bc.getConstant(idx) orelse {
+                    const val = if (idx < self.bytecode_constants.items.len)
+                        self.bytecode_constants.items[idx]
+                    else
+                        bc.getConstant(@as(u32, @intCast(idx)));
+                    if (val == null) {
                         const obj = try self.allocator.create(LispObject);
                         self.gcRegister(obj);
                         obj.* = LispObject.nilObj();
                         self.push(obj);
                         continue;
-                    };
-                    self.push(val);
+                    }
+                    self.push(val.?);
                 },
                 .do => {
                     const count = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) | (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
@@ -2943,13 +3076,18 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                     _ = count;
                 },
                 .call => {
-                    _ = bc.ops.items[pc]; // argCount
+                    const argCount: u8 = @intCast(bc.ops.items[pc]);
                     pc += 1;
-                    // Pop args (they're already in correct order on stack)
                     // Pop function (it's on top of args)
                     const fnVal = self.pop() orelse return error.StackUnderflow;
-                    std.debug.print("CALL: fnVal.type={s}\n", .{@tagName(fnVal.type)});
-                    // Apply function (simplified — just call the builtin or closure)
+                    std.debug.print("CALL: fnVal.type={s}, argCount={d}, stack.len={d}\n", .{
+                        @tagName(fnVal.type), argCount, self.stack.items.len,
+                    });
+                    // Print stack contents
+                    for (self.stack.items, 0..) |item, i| {
+                        std.debug.print("  stack[{d}] type={s}\n", .{ i, @tagName(item.type) });
+                    }
+                    // Apply function
                     switch (fnVal.value) {
                         .builtin => |name| {
                             // Dispatch to builtin
@@ -2985,9 +3123,420 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                                 }
                             }
                         },
+                        .closure => {
+                            // Extract body index and param chain from closure's next chain
+                            const bodyIdxObj = fnVal.next;
+                            const paramChain = if (bodyIdxObj) |bi| bi.next else null;
+                            const bodyIdx: u32 = if (bodyIdxObj) |bi|
+                                if (bi.type == .number) @intCast(bi.value.number)
+                                else 0
+                            else 0;
+
+                            // Pop args
+                            var args: [16]*LispObject = undefined;
+                            var ai: usize = 0;
+                            while (ai < argCount) : (ai += 1) {
+                                args[argCount - 1 - ai] = self.pop() orelse return error.StackUnderflow;
+                            }
+
+                            // Create child env and bind args to params
+                            var childEnv = current_env.child(self.allocator);
+                            errdefer childEnv.deinit();
+                            var paramPtr = paramChain;
+                            var argIdx: usize = 0;
+                            while (argIdx < argCount) {
+                                if (paramPtr) |p| {
+                                    const paramName = p.value.symbol.name[0..];
+                                    std.debug.print("  binding {s} = {s}\n", .{ paramName, @tagName(args[argIdx].type) });
+                                    try childEnv.bind(paramName, args[argIdx]);
+                                    paramPtr = p.next;
+                                }
+                                argIdx += 1;
+                            }
+
+                            // Execute body from separate bytecode array
+                            // Execute body from separate bytecode array
+                            std.debug.print("  executing closure body idx={d}, ops.len={d}\n", .{ bodyIdx, bc.closure_bodies.items.len });
+                            if (bodyIdx < bc.closure_bodies.items.len) {
+                                const bodyOps = &bc.closure_bodies.items[bodyIdx];
+                                std.debug.print("  body ops.len={d}\n", .{bodyOps.items.len});
+                                // Execute body opcodes
+                                var bodyPc: usize = 0;
+                                while (bodyPc < bodyOps.items.len) {
+                                    const bodyOp = @as(Opcode, @enumFromInt(bodyOps.items[bodyPc]));
+                                    bodyPc += 1;
+                                    std.debug.print("    bodyOp={s}\n", .{@tagName(bodyOp)});
+
+                                    switch (bodyOp) {
+                                        .nil => {
+                                            const obj = try self.allocator.create(LispObject);
+                                            self.gcRegister(obj);
+                                            obj.* = LispObject.nilObj();
+                                            self.push(obj);
+                                        },
+                                        .number => {
+                                            const n: i64 = @as(i64, bodyOps.items[bodyPc]) |
+                                                (@as(i64, bodyOps.items[bodyPc + 1]) << 8) |
+                                                (@as(i64, bodyOps.items[bodyPc + 2]) << 16) |
+                                                (@as(i64, bodyOps.items[bodyPc + 3]) << 24) |
+                                                (@as(i64, bodyOps.items[bodyPc + 4]) << 32) |
+                                                (@as(i64, bodyOps.items[bodyPc + 5]) << 40) |
+                                                (@as(i64, bodyOps.items[bodyPc + 6]) << 48) |
+                                                (@as(i64, bodyOps.items[bodyPc + 7]) << 56);
+                                            bodyPc += 8;
+                                            const obj = try self.allocator.create(LispObject);
+                                            self.gcRegister(obj);
+                                            obj.* = LispObject.numberObj(n);
+                                            self.push(obj);
+                                        },
+                                        .symbol => {
+                                            const idx: u32 = @as(u32, bodyOps.items[bodyPc]) |
+                                                (@as(u32, bodyOps.items[bodyPc + 1]) << 8) |
+                                                (@as(u32, bodyOps.items[bodyPc + 2]) << 16) |
+                                                (@as(u32, bodyOps.items[bodyPc + 3]) << 24);
+                                            bodyPc += 4;
+                                            // Look up in bytecode_constants first (where compileExpr stores symbols),
+                                            // then bc.constants as fallback
+                                            const symObj = if (idx < self.bytecode_constants.items.len)
+                                                self.bytecode_constants.items[idx]
+                                            else
+                                                bc.getConstant(idx);
+                                            if (symObj) |so| {
+                                                const name = so.value.symbol.name[0..];
+                                                // Check if it's a builtin
+                                                if (self.dispatch_table.get(name)) |_| {
+                                                    const builtinObj = try self.allocator.create(LispObject);
+                                                    self.gcRegister(builtinObj);
+                                                    builtinObj.* = LispObject{
+                                                        .type = .builtin,
+                                                        .value = .{ .builtin = name },
+                                                        .next = null,
+                                                        .marked = false,
+                                                    };
+                                                    self.push(builtinObj);
+                                                } else {
+                                                    if (childEnv.lookup(name)) |val| {
+                                                        self.push(val);
+                                                    } else {
+                                                        const obj = try self.allocator.create(LispObject);
+                                                        self.gcRegister(obj);
+                                                        obj.* = LispObject.nilObj();
+                                                        self.push(obj);
+                                                    }
+                                                }
+                                            } else {
+                                                const obj = try self.allocator.create(LispObject);
+                                                self.gcRegister(obj);
+                                                obj.* = LispObject.nilObj();
+                                                self.push(obj);
+                                            }
+                                        },
+                                        .const_val => {
+                                            const idx: u32 = @as(u32, bodyOps.items[bodyPc]) |
+                                                (@as(u32, bodyOps.items[bodyPc + 1]) << 8) |
+                                                (@as(u32, bodyOps.items[bodyPc + 2]) << 16) |
+                                                (@as(u32, bodyOps.items[bodyPc + 3]) << 24);
+                                            bodyPc += 4;
+                                            const val = if (idx < bc.constants.items.len) bc.constants.items[idx] else null;
+                                            if (val) |v| {
+                                                self.push(v);
+                                            } else {
+                                                const obj = try self.allocator.create(LispObject);
+                                                self.gcRegister(obj);
+                                                obj.* = LispObject.nilObj();
+                                                self.push(obj);
+                                            }
+                                        },
+                                        .call => {
+                                            // Nested call — handle recursively
+                                            const nestedArgCount: u8 = @intCast(bodyOps.items[bodyPc]);
+                                            bodyPc += 1;
+                                            const nestedFnVal = self.pop() orelse return error.StackUnderflow;
+                                            switch (nestedFnVal.value) {
+                                                .builtin => |n| {
+                                                    if (self.dispatch_table.get(n)) |kind| {
+                                                        switch (kind) {
+                                                            .add => try self.primAdd(),
+                                                            .sub => try self.primSub(),
+                                                            .mul => try self.primMul(),
+                                                            .div => try self.primDiv(),
+                                                            .rem => try self.primRem(),
+                                                            .eq => try self.primEq(),
+                                                            .lt => try self.primLt(),
+                                                            .gt => try self.primGt(),
+                                                            .le => try self.primLe(),
+                                                            .ge => try self.primGe(),
+                                                            .cons => try self.primCons(),
+                                                            .car => try self.primCar(),
+                                                            .cdr => try self.primCdr(),
+                                                            .print => try self.primPrint(),
+                                                            .null => try self.primNullQ(),
+                                                            .symbol => try self.primSymbolQ(),
+                                                            .number => try self.primNumberQ(),
+                                                            .list => try self.primListQ(),
+                                                            .length => try self.primLength(),
+                                                            .append => try self.primAppend(),
+                                                            .reverse => try self.primReverse(),
+                                                            .member => try self.primMember(),
+                                                            .assoc => try self.primAssoc(),
+                                                            .map => try self.primMap(),
+                                                            .filter => try self.primFilter(),
+                                                            .println => try self.primPrintln(),
+                                                            else => {},
+                                                        }
+                                                    }
+                                                },
+                                                .closure => {
+                                                    // Nested closure call — recursively execute
+                                                    const nestedBodyIdxObj = nestedFnVal.next;
+                                                    const nestedParamChain = if (nestedBodyIdxObj) |bi| bi.next else null;
+                                                    const nestedBodyIdx: u32 = if (nestedBodyIdxObj) |bi|
+                                                        if (bi.type == .number) @intCast(bi.value.number)
+                                                        else 0
+                                                    else 0;
+
+                                                    var nestedArgs: [16]*LispObject = undefined;
+                                                    var nai: usize = 0;
+                                                    while (nai < nestedArgCount) : (nai += 1) {
+                                                        nestedArgs[nestedArgCount - 1 - nai] = self.pop() orelse return error.StackUnderflow;
+                                                    }
+
+                                                    var nestedChildEnv = childEnv.child(self.allocator);
+                                                    errdefer nestedChildEnv.deinit();
+                                                    var nparamPtr = nestedParamChain;
+                                                    var nargIdx: usize = 0;
+                                                    while (nargIdx < nestedArgCount) {
+                                                        if (nparamPtr) |p| {
+                                                            const nparamName = p.value.symbol.name[0..];
+                                                            try nestedChildEnv.bind(nparamName, nestedArgs[nargIdx]);
+                                                            nparamPtr = p.next;
+                                                        }
+                                                        nargIdx += 1;
+                                                    }
+
+                                                    if (nestedBodyIdx < bc.closure_bodies.items.len) {
+                                                        const nestedBodyOps = &bc.closure_bodies.items[nestedBodyIdx];
+                                                        var nbPc: usize = 0;
+                                                        while (nbPc < nestedBodyOps.items.len) {
+                                                            const nbOp = @as(Opcode, @enumFromInt(nestedBodyOps.items[nbPc]));
+                                                            nbPc += 1;
+                                                            switch (nbOp) {
+                                                                .nil => {
+                                                                    const obj = try self.allocator.create(LispObject);
+                                                                    self.gcRegister(obj);
+                                                                    obj.* = LispObject.nilObj();
+                                                                    self.push(obj);
+                                                                },
+                                                                .number => {
+                                                                    const n: i64 = @as(i64, nestedBodyOps.items[nbPc]) |
+                                                                        (@as(i64, nestedBodyOps.items[nbPc + 1]) << 8) |
+                                                                        (@as(i64, nestedBodyOps.items[nbPc + 2]) << 16) |
+                                                                        (@as(i64, nestedBodyOps.items[nbPc + 3]) << 24) |
+                                                                        (@as(i64, nestedBodyOps.items[nbPc + 4]) << 32) |
+                                                                        (@as(i64, nestedBodyOps.items[nbPc + 5]) << 40) |
+                                                                        (@as(i64, nestedBodyOps.items[nbPc + 6]) << 48) |
+                                                                        (@as(i64, nestedBodyOps.items[nbPc + 7]) << 56);
+                                                                    nbPc += 8;
+                                                                    const obj = try self.allocator.create(LispObject);
+                                                                    self.gcRegister(obj);
+                                                                    obj.* = LispObject.numberObj(n);
+                                                                    self.push(obj);
+                                                                },
+                                                                .symbol => {
+                                                                    const sidx: u32 = @as(u32, nestedBodyOps.items[nbPc]) |
+                                                                        (@as(u32, nestedBodyOps.items[nbPc + 1]) << 8) |
+                                                                        (@as(u32, nestedBodyOps.items[nbPc + 2]) << 16) |
+                                                                        (@as(u32, nestedBodyOps.items[nbPc + 3]) << 24);
+                                                                    nbPc += 4;
+                                                                    const sobj = if (sidx < bc.constants.items.len) bc.constants.items[sidx] else null;
+                                                                    if (sobj) |so| {
+                                                                        if (nestedChildEnv.lookup(so.value.symbol.name[0..])) |val| {
+                                                                            self.push(val);
+                                                                        } else {
+                                                                            const obj = try self.allocator.create(LispObject);
+                                                                            self.gcRegister(obj);
+                                                                            obj.* = LispObject.nilObj();
+                                                                            self.push(obj);
+                                                                        }
+                                                                    } else {
+                                                                        const obj = try self.allocator.create(LispObject);
+                                                                        self.gcRegister(obj);
+                                                                        obj.* = LispObject.nilObj();
+                                                                        self.push(obj);
+                                                                    }
+                                                                },
+                                                                .const_val => {
+                                                                    const cidx: u32 = @as(u32, nestedBodyOps.items[nbPc]) |
+                                                                        (@as(u32, nestedBodyOps.items[nbPc + 1]) << 8) |
+                                                                        (@as(u32, nestedBodyOps.items[nbPc + 2]) << 16) |
+                                                                        (@as(u32, nestedBodyOps.items[nbPc + 3]) << 24);
+                                                                    nbPc += 4;
+                                                                    const cval = if (cidx < bc.constants.items.len) bc.constants.items[cidx] else null;
+                                                                    if (cval) |cv| {
+                                                                        self.push(cv);
+                                                                    } else {
+                                                                        const obj = try self.allocator.create(LispObject);
+                                                                        self.gcRegister(obj);
+                                                                        obj.* = LispObject.nilObj();
+                                                                        self.push(obj);
+                                                                    }
+                                                                },
+                                                                else => {},
+                                                            }
+                                                        }
+                                                    }
+                                                },
+                                                .symbol => {
+                                                    // Check if it's a builtin name from const_val
+                                                    const name = nestedFnVal.value.symbol.name[0..];
+                                                    if (self.dispatch_table.get(name)) |kind| {
+                                                        switch (kind) {
+                                                            .add => try self.primAdd(),
+                                                            .sub => try self.primSub(),
+                                                            .mul => try self.primMul(),
+                                                            .div => try self.primDiv(),
+                                                            .rem => try self.primRem(),
+                                                            .eq => try self.primEq(),
+                                                            .lt => try self.primLt(),
+                                                            .gt => try self.primGt(),
+                                                            .le => try self.primLe(),
+                                                            .ge => try self.primGe(),
+                                                            .cons => try self.primCons(),
+                                                            .car => try self.primCar(),
+                                                            .cdr => try self.primCdr(),
+                                                            .print => try self.primPrint(),
+                                                            .null => try self.primNullQ(),
+                                                            .symbol => try self.primSymbolQ(),
+                                                            .number => try self.primNumberQ(),
+                                                            .list => try self.primListQ(),
+                                                            .length => try self.primLength(),
+                                                            .append => try self.primAppend(),
+                                                            .reverse => try self.primReverse(),
+                                                            .member => try self.primMember(),
+                                                            .assoc => try self.primAssoc(),
+                                                            .map => try self.primMap(),
+                                                            .filter => try self.primFilter(),
+                                                            .println => try self.primPrintln(),
+                                                            else => {},
+                                                        }
+                                                    } else {
+                                                        const obj = try self.allocator.create(LispObject);
+                                                        self.gcRegister(obj);
+                                                        obj.* = LispObject.nilObj();
+                                                        self.push(obj);
+                                                    }
+                                                },
+                                                else => {
+                                                    const obj = try self.allocator.create(LispObject);
+                                                    self.gcRegister(obj);
+                                                    obj.* = LispObject.nilObj();
+                                                    self.push(obj);
+                                                },
+                                            }
+                                        },
+                                        .jump => {
+                                            const offset = @as(u32, bodyOps.items[bodyPc]) |
+                                                (@as(u32, bodyOps.items[bodyPc + 1]) << 8) |
+                                                (@as(u32, bodyOps.items[bodyPc + 2]) << 16) |
+                                                (@as(u32, bodyOps.items[bodyPc + 3]) << 24);
+                                            bodyPc += 4;
+                                            bodyPc = @as(usize, offset);
+                                        },
+                                        .jump_if_false => {
+                                            const offset = @as(u32, bodyOps.items[bodyPc]) |
+                                                (@as(u32, bodyOps.items[bodyPc + 1]) << 8) |
+                                                (@as(u32, bodyOps.items[bodyPc + 2]) << 16) |
+                                                (@as(u32, bodyOps.items[bodyPc + 3]) << 24);
+                                            bodyPc += 4;
+                                            const top = self.peek();
+                                            if (top == null or top.?.type == .nil) {
+                                                bodyPc = @as(usize, offset);
+                                            }
+                                        },
+                                        .def => {
+                                            const idx: u32 = @as(u32, bodyOps.items[bodyPc]) |
+                                                (@as(u32, bodyOps.items[bodyPc + 1]) << 8) |
+                                                (@as(u32, bodyOps.items[bodyPc + 2]) << 16) |
+                                                (@as(u32, bodyOps.items[bodyPc + 3]) << 24);
+                                            bodyPc += 4;
+                                            const val = self.pop() orelse return error.StackUnderflow;
+                                            const symObj = if (idx < bc.constants.items.len) bc.constants.items[idx] else null;
+                                            if (symObj) |so| {
+                                                try childEnv.bind(so.value.symbol.name[0..], val);
+                                            }
+                                        },
+                                        .defn => {
+                                            const idx: u32 = @as(u32, bodyOps.items[bodyPc]) |
+                                                (@as(u32, bodyOps.items[bodyPc + 1]) << 8) |
+                                                (@as(u32, bodyOps.items[bodyPc + 2]) << 16) |
+                                                (@as(u32, bodyOps.items[bodyPc + 3]) << 24);
+                                            bodyPc += 4;
+                                            const val = self.pop() orelse return error.StackUnderflow;
+                                            const symObj = if (idx < bc.constants.items.len) bc.constants.items[idx] else null;
+                                            if (symObj) |so| {
+                                                try childEnv.bind(so.value.symbol.name[0..], val);
+                                            }
+                                        },
+                                        .let => {
+                                            const count: u32 = @as(u32, bodyOps.items[bodyPc]) |
+                                                (@as(u32, bodyOps.items[bodyPc + 1]) << 8) |
+                                                (@as(u32, bodyOps.items[bodyPc + 2]) << 16) |
+                                                (@as(u32, bodyOps.items[bodyPc + 3]) << 24);
+                                            bodyPc += 4;
+                                            const startIdx: u32 = @as(u32, bodyOps.items[bodyPc]) |
+                                                (@as(u32, bodyOps.items[bodyPc + 1]) << 8) |
+                                                (@as(u32, bodyOps.items[bodyPc + 2]) << 16) |
+                                                (@as(u32, bodyOps.items[bodyPc + 3]) << 24);
+                                            bodyPc += 4;
+                                            var letChildEnv = childEnv.child(self.allocator);
+                                            errdefer letChildEnv.deinit();
+                                            var li: usize = 0;
+                                            while (li < count) : (li += 1) {
+                                                const val = self.pop() orelse return error.StackUnderflow;
+                                                const symObj = if (startIdx + li < bc.constants.items.len) bc.constants.items[startIdx + li] else null;
+                                                if (symObj) |so| {
+                                                    try letChildEnv.bind(so.value.symbol.name[0..], val);
+                                                }
+                                            }
+                                            current_env = &letChildEnv;
+                                        },
+                                        .iff => {
+                                            const elseOffset = @as(u32, bodyOps.items[bodyPc]) |
+                                                (@as(u32, bodyOps.items[bodyPc + 1]) << 8) |
+                                                (@as(u32, bodyOps.items[bodyPc + 2]) << 16) |
+                                                (@as(u32, bodyOps.items[bodyPc + 3]) << 24);
+                                            bodyPc += 4;
+                                            const top = self.peek();
+                                            if (top == null or top.?.type == .nil) {
+                                                bodyPc = @as(usize, elseOffset);
+                                            }
+                                        },
+                                        .quote => {
+                                            const idx: u32 = @as(u32, bodyOps.items[bodyPc]) |
+                                                (@as(u32, bodyOps.items[bodyPc + 1]) << 8) |
+                                                (@as(u32, bodyOps.items[bodyPc + 2]) << 16) |
+                                                (@as(u32, bodyOps.items[bodyPc + 3]) << 24);
+                                            bodyPc += 4;
+                                            const val = if (idx < bc.constants.items.len) bc.constants.items[idx] else null;
+                                            if (val) |v| {
+                                                self.push(v);
+                                            } else {
+                                                const obj = try self.allocator.create(LispObject);
+                                                self.gcRegister(obj);
+                                                obj.* = LispObject.nilObj();
+                                                self.push(obj);
+                                            }
+                                        },
+                                        .do => {
+                                            _ = bodyOps.items[bodyPc];
+                                            bodyPc += 4;
+                                        },
+                                        else => {},
+                                    }
+                                }
+                            }
+                        },
                         else => {
-                            // For closures, we'd need to evaluate the body
-                            // For now, just push nil
                             const obj = try self.allocator.create(LispObject);
                             self.gcRegister(obj);
                             obj.* = LispObject.nilObj();
