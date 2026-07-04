@@ -2608,11 +2608,11 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
         childArena.* = std.heap.ArenaAllocator.init(self.allocator);
         const childEnv = try self.allocator.create(Environment);
         childEnv.* = Environment.init(cl.env, childArena.allocator());
+        errdefer childArena.deinit();
         errdefer {
             childEnv.deinit();
             self.allocator.destroy(childEnv);
         }
-        errdefer childArena.deinit();
 
         // Bind parameters
         var ai2: usize = 0;
