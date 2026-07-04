@@ -7041,6 +7041,25 @@ test "bytecode — do block" {
     try std.testing.expectEqual(@as(i64, 7), result.value.number);
 }
 
+test "bytecode — nil" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // Compile nil literal
+    try bc.compileExpr(Expr.nilExpr(), &env, &vm);
+
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expect(result.type == .nil);
+}
+
 test "bytecode — defn and call" {
     const alloc = std.heap.page_allocator;
     var arena = std.heap.ArenaAllocator.init(alloc);
