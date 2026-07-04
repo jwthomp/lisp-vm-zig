@@ -8,3 +8,23 @@ zig-out.*
 lisp_vm
 lisp-vm
 lisp_vm.*
+
+# === Agent / tool output ===
+.pi-subagents/
+graphify-out/
+
+# === Editor / IDE ===
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# === Lock files ===
+*.lock
+
+# === macOS ===
+.DS_Store
+
+# === OS temp ===
+Thumbs.db
