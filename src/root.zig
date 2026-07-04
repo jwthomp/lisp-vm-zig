@@ -6282,61 +6282,41 @@ fn stdoutWrite(buf: []const u8) void {
     _ = os.linux.write(posix.STDOUT_FILENO, buf.ptr, buf.len);
 }
 
-/// Redraw the prompt line with a history item.
-fn redrawHistoryLine(hist_line: []const u8, current_len: usize) void {
-    const pad: []const u8 = &[_]u8{' '} ** 256;
-    // Move cursor to start of line
-    stdoutWrite("\r");
-    // Print history content
-    stdoutWrite(hist_line);
-    // Pad with spaces if history is shorter than current typed length
-    if (hist_line.len < current_len) {
-        var p: usize = hist_line.len;
-        while (p < current_len) {
-            const to_write: usize = @min(current_len - p, pad.len);
-            stdoutWrite(pad[0..to_write]);
-            p += to_write;
-        }
-    }
-    // Move cursor back to start
-    stdoutWrite("\r");
-}
-
-/// Redraw an empty line (end of history).
-fn redrawEmptyLine(current_len: usize) void {
-    if (current_len == 0) return;
-    const pad: []const u8 = &[_]u8{' '} ** 256;
-    stdoutWrite("\r");
-    var p: usize = 0;
-    while (p < current_len) {
-        const to_write: usize = @min(current_len - p, pad.len);
-        stdoutWrite(pad[0..to_write]);
-        p += to_write;
-    }
-    stdoutWrite("\r");
+/// Redraw the current line with `line_content`.  Clears the line first
+/// so old content cannot bleed through, and leaves the cursor at the
+/// end of the content so the user can keep editing.
+fn redrawHistoryLine(line_content: []const u8) void {
+    // Clear the entire line, move cursor to column 0, then print fresh content.
+    stdoutWrite("\x1b[2K\x1b[1G");
+    stdoutWrite(line_content);
 }
 
 pub fn replLoop(vm: *Vm, env: *Environment) void {
-    // ---- Terminal raw/cbreak mode setup ----
-    // Save the current terminal settings so we can restore them on exit.
-    const saved_termios = posix.tcgetattr(posix.STDIN_FILENO) catch {
-        debugPrint("Warning: could not get terminal settings, continuing without raw mode\n", .{});
-        return;
-    };
-    defer posix.tcsetattr(posix.STDIN_FILENO, .NOW, saved_termios) catch {};
+    // ---- Terminal raw/cbreak mode setup (only when stdin is a tty) ----
+    // Try to get terminal settings — if it fails, stdin is not a tty.
+    var in_tty: bool = false;
+    var saved_termios: std.posix.termios = undefined;
+    if (posix.tcgetattr(posix.STDIN_FILENO) catch null) |term| {
+        saved_termios = term;
+        in_tty = true;
 
-    // Set stdin to cbreak mode: disable canonical mode so escape sequences
-    // arrive immediately, keep ECHO so the user sees what they type.
-    var raw_termios = saved_termios;
-    raw_termios.lflag.ICANON = false;
-    raw_termios.lflag.ECHO = false;  // We handle display ourselves via redrawHistoryLine
-    // Linux termios cc[] indices: VTIME=5, VMIN=6
-    raw_termios.cc[5] = 0; // VTIME = 0 (read returns immediately with >= 1 byte)
-    raw_termios.cc[6] = 1; // VMIN = 1 (read returns with >= 1 byte)
-    posix.tcsetattr(posix.STDIN_FILENO, .NOW, raw_termios) catch {
-        debugPrint("Warning: could not set terminal to raw mode\n", .{});
-        return;
-    };
+        // Set stdin to cbreak mode: disable canonical mode so escape sequences
+        // arrive immediately, keep ECHO so the user sees what they type.
+        var raw_termios = saved_termios;
+        raw_termios.lflag.ICANON = false;
+        raw_termios.lflag.ECHO = false;
+        raw_termios.cc[5] = 0; // VTIME = 0
+        raw_termios.cc[6] = 1; // VMIN = 1
+        _ = posix.tcsetattr(posix.STDIN_FILENO, .NOW, raw_termios) catch {
+            debugPrint("Warning: could not set terminal to raw mode\n", .{});
+            in_tty = false;
+        };
+    } else {
+        debugPrint("Warning: stdin is not a tty, running without raw mode\n", .{});
+    }
+    if (in_tty) {
+        defer posix.tcsetattr(posix.STDIN_FILENO, .NOW, saved_termios) catch {};
+    }
     // ---- End terminal raw mode setup ----
 
     const max_history: usize = 100;
@@ -6373,9 +6353,16 @@ pub fn replLoop(vm: *Vm, env: *Environment) void {
 
         var esc_state: usize = 0; // 0=normal, 1=ESC received, 2=ESC[ received
 
+        var eof_reached: bool = false;
         while (true) {
             var ch_buf: [1]u8 = undefined;
-            if ((posix.read(posix.STDIN_FILENO, &ch_buf) catch 0) != 1) break;
+            // Read one byte; catch errors and treat them as EOF.
+            const n = (posix.read(posix.STDIN_FILENO, &ch_buf) catch 0);
+            if (n == 0) {
+                eof_reached = true;
+                break;
+            }
+            if (n != 1) break;
             const ch = ch_buf[0];
 
             if (esc_state == 0) {
@@ -6396,49 +6383,54 @@ pub fn replLoop(vm: *Vm, env: *Environment) void {
             if (esc_state == 2) {
                 if (ch == 'A') {
                     // Up arrow: go back one entry in history (toward older).
+                    // Save current line_buf ONLY when navigating up from end (hist_idx == history.items.len).
+                    // This preserves the user's original input in pending_buf.
                     if (hist_idx == history.items.len and history.items.len > 0) {
-                        // At end: save current line_buf to pending_buf, go to most recent history.
                         if (pending_buf.items.len > 0) std.heap.page_allocator.free(pending_buf.items);
                         pending_buf.items = std.heap.page_allocator.dupe(u8, line_buf.items) catch unreachable;
                         pending_buf.capacity = pending_buf.items.len;
-                        hist_idx = history.items.len - 1;
-                    } else if (hist_idx > 0) {
-                        // Browsing: go to older entry, save current line_buf to pending_buf.
-                        if (pending_buf.items.len > 0) std.heap.page_allocator.free(pending_buf.items);
-                        pending_buf.items = std.heap.page_allocator.dupe(u8, line_buf.items) catch unreachable;
-                        pending_buf.capacity = pending_buf.items.len;
-                        hist_idx -= 1;
                     }
+                    if (hist_idx > 0) hist_idx -= 1;
+                    // Always update line_buf to match the history item being displayed
+                    // so that line_buf stays in sync with what's on screen.
                     if (hist_idx < history.items.len) {
-                        redrawHistoryLine(history.items[hist_idx], line_buf.items.len);
+                        if (line_buf.items.len > 0) std.heap.page_allocator.free(line_buf.items);
+                        line_buf.items = std.heap.page_allocator.dupe(
+                            u8, history.items[hist_idx],
+                        ) catch unreachable;
+                        line_buf.capacity = line_buf.items.len;
                     }
+                    redrawHistoryLine(line_buf.items);
                 } else if (ch == 'B') {
                     // Down arrow: go forward one entry (toward newer / end).
                     if (hist_idx < history.items.len) {
                         hist_idx += 1;
                         if (hist_idx < history.items.len) {
-                            // Going into a history item: save current line_buf to pending_buf.
-                            if (pending_buf.items.len > 0) std.heap.page_allocator.free(pending_buf.items);
-                            pending_buf.items = std.heap.page_allocator.dupe(u8, line_buf.items) catch unreachable;
-                            pending_buf.capacity = pending_buf.items.len;
-                            redrawHistoryLine(history.items[hist_idx], pending_buf.items.len);
-                        } else {
-                            // At end — restore line_buf from pending_buf.
-                            if (pending_buf.items.len > 0) {
+                            // Navigate to next history item — update line_buf.
+                            if (line_buf.items.len > 0)
                                 std.heap.page_allocator.free(line_buf.items);
-                                line_buf.items = pending_buf.items;
-                                line_buf.capacity = pending_buf.capacity;
-                                pending_buf.items = &[_]u8{};
-                                pending_buf.capacity = 0;
-                            }
-                            redrawHistoryLine(line_buf.items, line_buf.items.len);
+                            line_buf.items = std.heap.page_allocator.dupe(
+                                u8, history.items[hist_idx],
+                            ) catch unreachable;
+                            line_buf.capacity = line_buf.items.len;
+                        } else {
+                            // At end — restore the user's original input from pending_buf.
+                            if (line_buf.items.len > 0)
+                                std.heap.page_allocator.free(line_buf.items);
+                            line_buf.items = pending_buf.items;
+                            line_buf.capacity = pending_buf.capacity;
+                            pending_buf.items = &[_]u8{};
+                            pending_buf.capacity = 0;
                         }
                     }
-                    // Already at end (hist_idx == history.items.len): nothing.
+                    redrawHistoryLine(line_buf.items);
                 }
                 esc_state = 0;
             }
         }
+
+        // If EOF was reached while reading, exit the REPL.
+        if (eof_reached) break;
 
         // After reading a complete line: save it to history (unless empty or already saved).
         var trimmed_end = line_buf.items.len;
