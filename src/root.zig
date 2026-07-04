@@ -6353,6 +6353,14 @@ pub fn replLoop(vm: *Vm, env: *Environment) void {
     // hist_idx < history.items.len means browsing a history item.
     var hist_idx: usize = 0;
 
+    // Buffer for the user's current input, saved before navigating up in history.
+    // When navigating back down, this buffer is restored.
+    var pending_buf: std.ArrayListUnmanaged(u8) = .{
+        .items = &[_]u8{},
+        .capacity = 0,
+    };
+    errdefer pending_buf.deinit(std.heap.page_allocator);
+
     debugPrint("Lisp VM REPL — type 'quit' to exit\n", .{});
 
     while (true) {
@@ -6380,17 +6388,25 @@ pub fn replLoop(vm: *Vm, env: *Environment) void {
                 if (ch >= 0x20 and ch < 0x7F) stdoutWrite(&[_]u8{ch});
                 // Append character to input line (grows buffer automatically).
                 line_buf.append(std.heap.page_allocator, ch) catch unreachable;
-            } else if (esc_state == 1) {
+            }
+            if (esc_state == 1) {
                 esc_state = if (ch == '[') 2 else 0;
                 continue;
-            } else if (esc_state == 2) {
+            }
+            if (esc_state == 2) {
                 if (ch == 'A') {
                     // Up arrow: go back one entry in history (toward older).
-                    if (hist_idx == history.items.len  and history.items.len > 0) {
-                        // At end: go to the most recent entry.
+                    if (hist_idx == history.items.len and history.items.len > 0) {
+                        // At end: save current line_buf to pending_buf, go to most recent history.
+                        if (pending_buf.items.len > 0) std.heap.page_allocator.free(pending_buf.items);
+                        pending_buf.items = std.heap.page_allocator.dupe(u8, line_buf.items) catch unreachable;
+                        pending_buf.capacity = pending_buf.items.len;
                         hist_idx = history.items.len - 1;
                     } else if (hist_idx > 0) {
-                        // Browsing: go to older entry.
+                        // Browsing: go to older entry, save current line_buf to pending_buf.
+                        if (pending_buf.items.len > 0) std.heap.page_allocator.free(pending_buf.items);
+                        pending_buf.items = std.heap.page_allocator.dupe(u8, line_buf.items) catch unreachable;
+                        pending_buf.capacity = pending_buf.items.len;
                         hist_idx -= 1;
                     }
                     if (hist_idx < history.items.len) {
@@ -6401,13 +6417,24 @@ pub fn replLoop(vm: *Vm, env: *Environment) void {
                     if (hist_idx < history.items.len) {
                         hist_idx += 1;
                         if (hist_idx < history.items.len) {
-                            redrawHistoryLine(history.items[hist_idx], line_buf.items.len);
+                            // Going into a history item: save current line_buf to pending_buf.
+                            if (pending_buf.items.len > 0) std.heap.page_allocator.free(pending_buf.items);
+                            pending_buf.items = std.heap.page_allocator.dupe(u8, line_buf.items) catch unreachable;
+                            pending_buf.capacity = pending_buf.items.len;
+                            redrawHistoryLine(history.items[hist_idx], pending_buf.items.len);
                         } else {
-                            // At end — restore the current input buffer.
+                            // At end — restore line_buf from pending_buf.
+                            if (pending_buf.items.len > 0) {
+                                std.heap.page_allocator.free(line_buf.items);
+                                line_buf.items = pending_buf.items;
+                                line_buf.capacity = pending_buf.capacity;
+                                pending_buf.items = &[_]u8{};
+                                pending_buf.capacity = 0;
+                            }
                             redrawHistoryLine(line_buf.items, line_buf.items.len);
                         }
                     }
-                    // hist_idx == history.items.len (already at end): nothing.
+                    // Already at end (hist_idx == history.items.len): nothing.
                 }
                 esc_state = 0;
             }
