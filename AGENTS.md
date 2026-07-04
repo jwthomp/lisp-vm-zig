@@ -63,4 +63,46 @@ git push                # Push to remote
 - Use descriptive titles and set appropriate priority/type
 - Always sync before ending session
 
+## Standard Library
+
+The Lisp VM has a growing standard library located in `stdlib/stdlib.lisp`. This file contains high-level Lisp functions implemented using the core primitives (defn, def, cons, car, cdr, if, etc.).
+
+### Current Contents
+
+- `list` — create a list from arguments: `(list 1 2 3)` → `(1 2 3)`
+
+### How to Use the Standard Library
+
+1. **Discover tasks**: Run `br epic status` to see epics and their child tasks. Run `br ready` for actionable items.
+2. **Implement functions**: Each function should be a `defn` definition in `stdlib/stdlib.lisp`
+3. **Add tests**: For each new function, add a bytecode test in `src/root.zig` using the same pattern as existing tests
+4. **Verify**: Run `zig build test` — all tests must pass
+
+### Creating New Standard Library Tasks
+
+To add a new function to the standard library:
+
+1. Find the epic: `br show sqhn-yux` (the Standard Library epic)
+2. Create a task as a child of the epic:
+   ```bash
+   br create --title="Implement sort function" --parent=sqhn-yux --type=task --priority=3
+   ```
+3. Implement in `stdlib/stdlib.lisp` and add bytecode tests
+4. Close the task when done
+
+### Naming Conventions
+
+- Predicates end with `?`: `null?`, `number?`, `list?`, `even?`, `odd?`, `equal?`
+- List operations: `car`, `cdr`, `cons`, `append`, `reverse`, `nth`, `member`
+- Math: `abs`, `max`, `min`, `mod`, `sqrt`
+- Keep function names consistent with Common Lisp conventions
+
+## Epic Management
+
+Epics track larger bodies of work with multiple child tasks:
+
+- `br epic status` — Show all epics and their progress
+- Epics are automatically created with type `epic`
+- Use `br update <epic-id> --status=closed` when all children are closed
+
 <!-- end-br-agent-instructions -->
