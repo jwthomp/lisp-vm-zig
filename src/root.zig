@@ -6276,164 +6276,159 @@ test "example — even? inline: (even? 4) = 0 (false)" {
 // CLI Entry Point
 // ============================================================
 
-pub fn replLoop(vm: *Vm, env: *Environment) void {
-    const max_history: usize = 100;
-    var history: std.ArrayListUnmanaged([]const u8) = .{};
-    var hist_idx: usize = 0;
+/// Write a buffer to stdout via sys_write (os.linux.write on Linux).
+fn stdoutWrite(buf: []const u8) void {
+    if (buf.len == 0) return;
+    _ = os.linux.write(posix.STDOUT_FILENO, buf.ptr, buf.len);
+}
 
-    var read_buf: [4096]u8 = undefined;
+/// Redraw the prompt line with a history item.
+fn redrawHistoryLine(hist_line: []const u8, current_len: usize) void {
+    const pad: []const u8 = &[_]u8{' '} ** 256;
+    // Move cursor to start of line
+    stdoutWrite("\r");
+    // Print history content
+    stdoutWrite(hist_line);
+    // Pad with spaces if history is shorter than current typed length
+    if (hist_line.len < current_len) {
+        var p: usize = hist_line.len;
+        while (p < current_len) {
+            const to_write: usize = @min(current_len - p, pad.len);
+            stdoutWrite(pad[0..to_write]);
+            p += to_write;
+        }
+    }
+    // Move cursor back to start
+    stdoutWrite("\r");
+}
+
+/// Redraw an empty line (end of history).
+fn redrawEmptyLine(current_len: usize) void {
+    if (current_len == 0) return;
+    const pad: []const u8 = &[_]u8{' '} ** 256;
+    stdoutWrite("\r");
+    var p: usize = 0;
+    while (p < current_len) {
+        const to_write: usize = @min(current_len - p, pad.len);
+        stdoutWrite(pad[0..to_write]);
+        p += to_write;
+    }
+    stdoutWrite("\r");
+}
+
+pub fn replLoop(vm: *Vm, env: *Environment) void {
+    // ---- Terminal raw/cbreak mode setup ----
+    // Save the current terminal settings so we can restore them on exit.
+    const saved_termios = posix.tcgetattr(posix.STDIN_FILENO) catch {
+        debugPrint("Warning: could not get terminal settings, continuing without raw mode\n", .{});
+        return;
+    };
+    defer posix.tcsetattr(posix.STDIN_FILENO, .NOW, saved_termios) catch {};
+
+    // Set stdin to cbreak mode: disable canonical mode so escape sequences
+    // arrive immediately, keep ECHO so the user sees what they type.
+    var raw_termios = saved_termios;
+    raw_termios.lflag.ICANON = false;
+    raw_termios.lflag.ECHO = false;  // We handle display ourselves via redrawHistoryLine
+    // Linux termios cc[] indices: VTIME=5, VMIN=6
+    raw_termios.cc[5] = 0; // VTIME = 0 (read returns immediately with >= 1 byte)
+    raw_termios.cc[6] = 1; // VMIN = 1 (read returns with >= 1 byte)
+    posix.tcsetattr(posix.STDIN_FILENO, .NOW, raw_termios) catch {
+        debugPrint("Warning: could not set terminal to raw mode\n", .{});
+        return;
+    };
+    // ---- End terminal raw mode setup ----
+
+    const max_history: usize = 100;
+
+    // History buffer: unmanaged array of line strings.
+    // Zig 0.16 ArrayListUnmanaged (ArrayList) has no .len field; len = items.len.
+    var history: std.ArrayListUnmanaged([]const u8) = .{
+        .items = &[_][]const u8{},
+        .capacity = 0,
+    };
+
+    // Current position in history.
+    // hist_idx == history.items.len means "end" — no history item, just the current input.
+    // hist_idx < history.items.len means browsing a history item.
+    var hist_idx: usize = 0;
 
     debugPrint("Lisp VM REPL — type 'quit' to exit\n", .{});
 
     while (true) {
-        // Read a line from stdin, handling arrow keys for history cycling
-        var line_buf_unm: std.ArrayListUnmanaged(u8) = .{};
-        errdefer line_buf_unm.deinit(std.heap.page_allocator);
+        // ---- Read a single line from stdin, handling arrow keys for history cycling ----
+        var line_buf: std.ArrayListUnmanaged(u8) = .{
+            .items = &[_]u8{},
+            .capacity = 0,
+        };
+        errdefer line_buf.deinit(std.heap.page_allocator);
 
-        // Read from stdin, processing escape sequences inline
-        var data_start: usize = 0;
+        var esc_state: usize = 0; // 0=normal, 1=ESC received, 2=ESC[ received
+
         while (true) {
-            if (data_start >= read_buf.len) {
-                // Need more input
-                const n = posix.read(posix.STDIN_FILENO, &read_buf) catch break;
-                if (n == 0) break;
-                data_start = 0;
-            }
+            var ch_buf: [1]u8 = undefined;
+            if ((posix.read(posix.STDIN_FILENO, &ch_buf) catch 0) != 1) break;
+            const ch = ch_buf[0];
 
-            var i = data_start;
-            var line_end: ?usize = null;
-            var esc_state: usize = 0;
-
-            while (i < read_buf.len) {
-                const ch = read_buf[i];
-                if (esc_state == 1 and ch == '[') {
-                    esc_state = 2;
-                    i += 1;
-                    continue;
-                }
-                if (esc_state == 2) {
-                    // We have ESC [ X
-                    if (ch == 'A') {
-                        // Up arrow — go back in history
-                        if (hist_idx >= history.items.len) {
-                            // At end: save current input as pending
-                            const current_line = try line_buf_unm.toOwnedSlice(std.heap.page_allocator);
-                            try history.append(std.heap.page_allocator, current_line);
-                            if (history.items.len > max_history) {
-                                _ = history.pop(std.heap.page_allocator);
-                            }
-                            hist_idx = history.items.len - 1;
-                        } else if (hist_idx > 0) {
-                            hist_idx -= 1;
-                        }
-                        // Redraw line with history item
-                        const hist_line = history.items[hist_idx];
-                        const len = hist_line.len;
-                        var r: usize = 0;
-                        while (r < len) {
-                            _ = posix.write(posix.STDOUT_FILENO, hist_line[r..r + 1]);
-                            r += 1;
-                        }
-                        if (hist_line.len < line_buf_unm.items.len) {
-                            const pad: []const u8 = &[_]u8{' '} ** 256;
-                            var p: usize = hist_line.len;
-                            while (p < line_buf_unm.items.len) {
-                                const to_write: usize = @min(line_buf_unm.items.len - p, pad.len);
-                                _ = posix.write(posix.STDOUT_FILENO, pad[0..to_write]);
-                                p += to_write;
-                            }
-                        }
-                        _ = posix.write(posix.STDOUT_FILENO, "\r");
-                        i += 1;
-                        esc_state = 0;
-                        continue;
-                    } else if (ch == 'B') {
-                        // Down arrow — go forward in history
-                        if (hist_idx < history.items.len - 1) {
-                            hist_idx += 1;
-                            const hist_line = history.items[hist_idx];
-                            const len = hist_line.len;
-                            var r: usize = 0;
-                            while (r < len) {
-                                _ = posix.write(posix.STDOUT_FILENO, hist_line[r..r + 1]);
-                                r += 1;
-                            }
-                            if (hist_line.len < line_buf_unm.items.len) {
-                                const pad: []const u8 = &[_]u8{' '} ** 256;
-                                var p: usize = hist_line.len;
-                                while (p < line_buf_unm.items.len) {
-                                    const to_write: usize = @min(line_buf_unm.items.len - p, pad.len);
-                                    _ = posix.write(posix.STDOUT_FILENO, pad[0..to_write]);
-                                    p += to_write;
-                                }
-                            }
-                            _ = posix.write(posix.STDOUT_FILENO, "\r");
-                        } else {
-                            // At end of history: clear line
-                            if (line_buf_unm.items.len > 0) {
-                                _ = posix.write(posix.STDOUT_FILENO, "\r");
-                                const pad: []const u8 = &[_]u8{' '} ** 256;
-                                var p: usize = 0;
-                                while (p < line_buf_unm.items.len) {
-                                    const to_write: usize = @min(line_buf_unm.items.len - p, pad.len);
-                                    _ = posix.write(posix.STDOUT_FILENO, pad[0..to_write]);
-                                    p += to_write;
-                                }
-                                _ = posix.write(posix.STDOUT_FILENO, "\r");
-                            }
-                            hist_idx = history.items.len;
-                        }
-                        i += 1;
-                        esc_state = 0;
-                        continue;
-                    } else if (ch == 'C') {
-                        // Right arrow — ignore
-                        i += 1;
-                        esc_state = 0;
-                        continue;
-                    } else {
-                        // Other escape sequence — just consume
-                        i += 1;
-                        esc_state = 0;
-                        continue;
-                    }
-                }
-
-                if (ch == '\n' or ch == '\r') {
-                    line_end = i;
-                    i += 1;
-                    esc_state = 0;
-                    break;
-                }
-
+            if (esc_state == 0) {
                 if (ch == '\x1b') {
                     esc_state = 1;
-                } else {
-                    line_buf_unm.appendAssumeCapacity(std.heap.page_allocator, ch);
+                    continue;
                 }
-                i += 1;
+                if (ch == '\n' or ch == '\r' or ch == 0x04) break;
+                // Echo printable characters so user sees what they type.
+                if (ch >= 0x20 and ch < 0x7F) stdoutWrite(&[_]u8{ch});
+                // Append character to input line (grows buffer automatically).
+                line_buf.append(std.heap.page_allocator, ch) catch unreachable;
+            } else if (esc_state == 1) {
+                esc_state = if (ch == '[') 2 else 0;
+                continue;
+            } else if (esc_state == 2) {
+                if (ch == 'A') {
+                    // Up arrow: go back one entry in history (toward older).
+                    if (hist_idx == history.items.len  and history.items.len > 0) {
+                        // At end: go to the most recent entry.
+                        hist_idx = history.items.len - 1;
+                    } else if (hist_idx > 0) {
+                        // Browsing: go to older entry.
+                        hist_idx -= 1;
+                    }
+                    if (hist_idx < history.items.len) {
+                        redrawHistoryLine(history.items[hist_idx], line_buf.items.len);
+                    }
+                } else if (ch == 'B') {
+                    // Down arrow: go forward one entry (toward newer / end).
+                    if (hist_idx < history.items.len) {
+                        hist_idx += 1;
+                        if (hist_idx < history.items.len) {
+                            redrawHistoryLine(history.items[hist_idx], line_buf.items.len);
+                        } else {
+                            // At end — restore the current input buffer.
+                            redrawHistoryLine(line_buf.items, line_buf.items.len);
+                        }
+                    }
+                    // hist_idx == history.items.len (already at end): nothing.
+                }
+                esc_state = 0;
             }
-
-            if (line_end != null) {
-                // Got a complete line
-                data_start = line_end.?;
-                break;
-            }
-
-            // No line yet, refil buffer
-            const n = posix.read(posix.STDIN_FILENO, &read_buf) catch break;
-            if (n == 0) break;
-            data_start = 0;
         }
 
-        // Trim line_buf
-        var trimmed_end = line_buf_unm.items.len;
-        while (trimmed_end > 0 and (line_buf_unm.items[trimmed_end - 1] == '\n' or line_buf_unm.items[trimmed_end - 1] == '\r')) {
+        // After reading a complete line: save it to history (unless empty or already saved).
+        var trimmed_end = line_buf.items.len;
+        while (trimmed_end > 0 and (line_buf.items[trimmed_end - 1] == '\n' or line_buf.items[trimmed_end - 1] == '\r')) {
             trimmed_end -= 1;
         }
-        line_buf_unm.shrinkRetainingCapacity(trimmed_end);
-
-        const input = line_buf_unm.items;
+        line_buf.shrinkRetainingCapacity(trimmed_end);
+        if (line_buf.items.len > 0 and hist_idx == history.items.len) {
+            // This is a fresh line submission — add to history.
+            const duped = std.heap.page_allocator.dupe(u8, line_buf.items) catch unreachable;
+            history.append(std.heap.page_allocator, duped) catch unreachable;
+            if (history.items.len > max_history) {
+                _ = history.pop();
+            }
+            hist_idx = history.items.len;
+        }
+        const input = line_buf.items;
         if (input.len == 0) continue;
 
         var trimmed = input;
