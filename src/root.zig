@@ -6277,44 +6277,168 @@ test "example — even? inline: (even? 4) = 0 (false)" {
 // ============================================================
 
 pub fn replLoop(vm: *Vm, env: *Environment) void {
-    var buffer: [1024]u8 = undefined;
-    var line_buf = std.ArrayList(u8).initCapacity(std.heap.page_allocator, 256) catch unreachable;
-    errdefer line_buf.deinit(std.heap.page_allocator);
+    const max_history: usize = 100;
+    var history: std.ArrayListUnmanaged([]const u8) = .{};
+    var hist_idx: usize = 0;
+
+    var read_buf: [4096]u8 = undefined;
 
     debugPrint("Lisp VM REPL — type 'quit' to exit\n", .{});
 
     while (true) {
-        // Read one line at a time (blocks on interactive stdin, processes all available on piped)
-        const n = posix.read(posix.STDIN_FILENO, &buffer) catch break;
-        if (n == 0) break;
+        // Read a line from stdin, handling arrow keys for history cycling
+        var line_buf_unm: std.ArrayListUnmanaged(u8) = .{};
+        errdefer line_buf_unm.deinit(std.heap.page_allocator);
 
-        // Split into lines and process each
+        // Read from stdin, processing escape sequences inline
         var data_start: usize = 0;
-        while (data_start < n) {
-            var line_end = data_start;
-            while (line_end < n and buffer[line_end] != '\n' and buffer[line_end] != '\r') {
-                line_end += 1;
+        while (true) {
+            if (data_start >= read_buf.len) {
+                // Need more input
+                const n = posix.read(posix.STDIN_FILENO, &read_buf) catch break;
+                if (n == 0) break;
+                data_start = 0;
             }
 
-            // Copy line to line_buf
-            line_buf.clearRetainingCapacity();
-            var li: usize = data_start;
-            while (li < line_end) {
-                line_buf.append(std.heap.page_allocator, buffer[li]) catch unreachable;
-                li += 1;
+            var i = data_start;
+            var line_end: ?usize = null;
+            var esc_state: usize = 0;
+
+            while (i < read_buf.len) {
+                const ch = read_buf[i];
+                if (esc_state == 1 and ch == '[') {
+                    esc_state = 2;
+                    i += 1;
+                    continue;
+                }
+                if (esc_state == 2) {
+                    // We have ESC [ X
+                    if (ch == 'A') {
+                        // Up arrow — go back in history
+                        if (hist_idx >= history.items.len) {
+                            // At end: save current input as pending
+                            const current_line = try line_buf_unm.toOwnedSlice(std.heap.page_allocator);
+                            try history.append(std.heap.page_allocator, current_line);
+                            if (history.items.len > max_history) {
+                                _ = history.pop(std.heap.page_allocator);
+                            }
+                            hist_idx = history.items.len - 1;
+                        } else if (hist_idx > 0) {
+                            hist_idx -= 1;
+                        }
+                        // Redraw line with history item
+                        const hist_line = history.items[hist_idx];
+                        const len = hist_line.len;
+                        var r: usize = 0;
+                        while (r < len) {
+                            _ = posix.write(posix.STDOUT_FILENO, hist_line[r..r + 1]);
+                            r += 1;
+                        }
+                        if (hist_line.len < line_buf_unm.items.len) {
+                            const pad: []const u8 = &[_]u8{' '} ** 256;
+                            var p: usize = hist_line.len;
+                            while (p < line_buf_unm.items.len) {
+                                const to_write: usize = @min(line_buf_unm.items.len - p, pad.len);
+                                _ = posix.write(posix.STDOUT_FILENO, pad[0..to_write]);
+                                p += to_write;
+                            }
+                        }
+                        _ = posix.write(posix.STDOUT_FILENO, "\r");
+                        i += 1;
+                        esc_state = 0;
+                        continue;
+                    } else if (ch == 'B') {
+                        // Down arrow — go forward in history
+                        if (hist_idx < history.items.len - 1) {
+                            hist_idx += 1;
+                            const hist_line = history.items[hist_idx];
+                            const len = hist_line.len;
+                            var r: usize = 0;
+                            while (r < len) {
+                                _ = posix.write(posix.STDOUT_FILENO, hist_line[r..r + 1]);
+                                r += 1;
+                            }
+                            if (hist_line.len < line_buf_unm.items.len) {
+                                const pad: []const u8 = &[_]u8{' '} ** 256;
+                                var p: usize = hist_line.len;
+                                while (p < line_buf_unm.items.len) {
+                                    const to_write: usize = @min(line_buf_unm.items.len - p, pad.len);
+                                    _ = posix.write(posix.STDOUT_FILENO, pad[0..to_write]);
+                                    p += to_write;
+                                }
+                            }
+                            _ = posix.write(posix.STDOUT_FILENO, "\r");
+                        } else {
+                            // At end of history: clear line
+                            if (line_buf_unm.items.len > 0) {
+                                _ = posix.write(posix.STDOUT_FILENO, "\r");
+                                const pad: []const u8 = &[_]u8{' '} ** 256;
+                                var p: usize = 0;
+                                while (p < line_buf_unm.items.len) {
+                                    const to_write: usize = @min(line_buf_unm.items.len - p, pad.len);
+                                    _ = posix.write(posix.STDOUT_FILENO, pad[0..to_write]);
+                                    p += to_write;
+                                }
+                                _ = posix.write(posix.STDOUT_FILENO, "\r");
+                            }
+                            hist_idx = history.items.len;
+                        }
+                        i += 1;
+                        esc_state = 0;
+                        continue;
+                    } else if (ch == 'C') {
+                        // Right arrow — ignore
+                        i += 1;
+                        esc_state = 0;
+                        continue;
+                    } else {
+                        // Other escape sequence — just consume
+                        i += 1;
+                        esc_state = 0;
+                        continue;
+                    }
+                }
+
+                if (ch == '\n' or ch == '\r') {
+                    line_end = i;
+                    i += 1;
+                    esc_state = 0;
+                    break;
+                }
+
+                if (ch == '\x1b') {
+                    esc_state = 1;
+                } else {
+                    line_buf_unm.appendAssumeCapacity(std.heap.page_allocator, ch);
+                }
+                i += 1;
             }
 
-            data_start = line_end;
-            while (data_start < n and (buffer[data_start] == '\n' or buffer[data_start] == '\r')) {
-                data_start += 1;
+            if (line_end != null) {
+                // Got a complete line
+                data_start = line_end.?;
+                break;
             }
 
-            if (line_buf.items.len == 0) continue;
+            // No line yet, refil buffer
+            const n = posix.read(posix.STDIN_FILENO, &read_buf) catch break;
+            if (n == 0) break;
+            data_start = 0;
+        }
 
-            const input = line_buf.items;
-            var trimmed = input;
-            while (trimmed.len > 0 and (trimmed[0] == ' ' or trimmed[0] == '\t')) trimmed = trimmed[1..];
-            if (std.mem.eql(u8, trimmed, "quit")) return;
+        // Trim line_buf
+        var trimmed_end = line_buf_unm.items.len;
+        while (trimmed_end > 0 and (line_buf_unm.items[trimmed_end - 1] == '\n' or line_buf_unm.items[trimmed_end - 1] == '\r')) {
+            trimmed_end -= 1;
+        }
+        line_buf_unm.shrinkRetainingCapacity(trimmed_end);
+
+        const input = line_buf_unm.items;
+        if (input.len == 0) continue;
+
+        var trimmed = input;
+        while (trimmed.len > 0 and (trimmed[0] == ' ' or trimmed[0] == '\t')) trimmed = trimmed[1..];
+        if (std.mem.eql(u8, trimmed, "quit")) return;
 
         debugPrint("> ", .{});
 
@@ -6442,7 +6566,6 @@ pub fn replLoop(vm: *Vm, env: *Environment) void {
             // Memory leaks in the REPL are acceptable for now.
             // std.heap.page_allocator.destroy(result);
         }
-    }
     }
 }
 
