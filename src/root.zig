@@ -413,7 +413,7 @@ pub const Bytecode = struct {
 
     /// Emit a single opcode byte
     fn emitOp(self: *Bytecode, op: Opcode) void {
-        self.ops.appendAssumeCapacity(@intFromEnum(op));
+        self.ops.append(self.allocator, @intFromEnum(op)) catch unreachable;
     }
 
     /// Emit an operand (u32, little-endian)
@@ -421,7 +421,7 @@ pub const Bytecode = struct {
         var v = val;
         var i: usize = 0;
         while (i < 4) : (i += 1) {
-            self.ops.appendAssumeCapacity(@as(u8, @intCast(v & 0xFF)));
+            self.ops.append(self.allocator, @as(u8, @intCast(v & 0xFF))) catch unreachable;
             v >>= 8;
         }
     }
@@ -431,7 +431,7 @@ pub const Bytecode = struct {
         var v = val;
         var i: usize = 0;
         while (i < 8) : (i += 1) {
-            self.ops.appendAssumeCapacity(@as(u8, @intCast(v & 0xFF)));
+            self.ops.append(self.allocator, @as(u8, @intCast(v & 0xFF))) catch unreachable;
             v >>= 8;
         }
     }
@@ -943,14 +943,14 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
         errdefer allocator.destroy(dt);
 
         var vm = Vm{
-            .stack = std.ArrayList(*LispObject).initCapacity(allocator, 8) catch unreachable,
+            .stack = std.ArrayList(*LispObject).initCapacity(allocator, 256) catch unreachable,
             .allocator = allocator,
             .rootEnv = env,
             .macroArgs = std.StringHashMap(Expr).init(allocator),
             .dispatch_table = dt,
             .packageTable = std.StringHashMap([]const u8).init(allocator),
-            .gcHeap = std.ArrayList(*LispObject).initCapacity(allocator, 16) catch unreachable,
-            .bytecode_constants = std.ArrayList(*LispObject).initCapacity(allocator, 16) catch unreachable,
+            .gcHeap = std.ArrayList(*LispObject).initCapacity(allocator, 64) catch unreachable,
+            .bytecode_constants = std.ArrayList(*LispObject).initCapacity(allocator, 64) catch unreachable,
         };
 
         // Register all builtins
@@ -3080,13 +3080,6 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                     pc += 1;
                     // Pop function (it's on top of args)
                     const fnVal = self.pop() orelse return error.StackUnderflow;
-                    std.debug.print("CALL: fnVal.type={s}, argCount={d}, stack.len={d}\n", .{
-                        @tagName(fnVal.type), argCount, self.stack.items.len,
-                    });
-                    // Print stack contents
-                    for (self.stack.items, 0..) |item, i| {
-                        std.debug.print("  stack[{d}] type={s}\n", .{ i, @tagName(item.type) });
-                    }
                     // Apply function
                     switch (fnVal.value) {
                         .builtin => |name| {
@@ -3156,16 +3149,13 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
 
                             // Execute body from separate bytecode array
                             // Execute body from separate bytecode array
-                            std.debug.print("  executing closure body idx={d}, ops.len={d}\n", .{ bodyIdx, bc.closure_bodies.items.len });
                             if (bodyIdx < bc.closure_bodies.items.len) {
                                 const bodyOps = &bc.closure_bodies.items[bodyIdx];
-                                std.debug.print("  body ops.len={d}\n", .{bodyOps.items.len});
                                 // Execute body opcodes
                                 var bodyPc: usize = 0;
                                 while (bodyPc < bodyOps.items.len) {
                                     const bodyOp = @as(Opcode, @enumFromInt(bodyOps.items[bodyPc]));
                                     bodyPc += 1;
-                                    std.debug.print("    bodyOp={s}\n", .{@tagName(bodyOp)});
 
                                     switch (bodyOp) {
                                         .nil => {
@@ -3534,7 +3524,11 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                                         else => {},
                                     }
                                 }
-                            }
+                                // Pop the result of the last expression in the body
+                                const resultVal = self.pop() orelse return error.StackUnderflow;
+                                                              // Push result back as the function call return value
+                                self.push(resultVal);
+                                                          }
                         },
                         else => {
                             const obj = try self.allocator.create(LispObject);
@@ -7580,5 +7574,771 @@ test "bytecode — defn and call" {
     }) }, &env, &vm);
 
     const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(ObjType.number, result.type);
     try std.testing.expectEqual(@as(i64, 42), result.value.number);
+}
+
+// ============================================================
+// ============================================================
+// Tests — stdlib functions via inline defn
+// ============================================================
+
+test "stdlib.lisp — first" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // (defn first (lst) (car lst))
+    const params: []Expr = try alloc.dupe(Expr, &[1]Expr{
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(params);
+    const body: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("car") },
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(body);
+    const defn: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = try symtab.getOrPut("first") },
+        Expr{ .list = params },
+        Expr{ .list = body },
+    });
+    defer alloc.free(defn);
+    _ = try vm.eval(Expr{ .list = defn }, &env);
+
+    // (first (cons 42 nil))
+    const lst: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 42 },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(lst);
+
+    const result = try vm.eval(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("first") },
+        Expr{ .list = lst },
+    }) }, &env);
+    try std.testing.expectEqual(@as(i64, 42), result.value.number);
+}
+
+test "stdlib.lisp — second" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // (defn second (lst) (car (cdr lst)))
+    const params: []Expr = try alloc.dupe(Expr, &[1]Expr{
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(params);
+    const body: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("car") },
+        Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+            Expr{ .symbol = try symtab.getOrPut("cdr") },
+            Expr{ .symbol = try symtab.getOrPut("lst") },
+        }) },
+    });
+    defer alloc.free(body);
+    const defn: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = try symtab.getOrPut("second") },
+        Expr{ .list = params },
+        Expr{ .list = body },
+    });
+    defer alloc.free(defn);
+    _ = try vm.eval(Expr{ .list = defn }, &env);
+
+    // (second (cons 1 (cons 2 nil)))
+    const inner: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 2 },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(inner);
+    const lst: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 1 },
+        Expr{ .list = inner },
+    });
+    defer alloc.free(lst);
+
+    const result = try vm.eval(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("second") },
+        Expr{ .list = lst },
+    }) }, &env);
+    try std.testing.expectEqual(@as(i64, 2), result.value.number);
+}
+
+test "stdlib.lisp — third" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // (defn third (lst) (car (cdr (cdr lst))))
+    const params: []Expr = try alloc.dupe(Expr, &[1]Expr{
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(params);
+    const body: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("car") },
+        Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+            Expr{ .symbol = try symtab.getOrPut("cdr") },
+            Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+                Expr{ .symbol = try symtab.getOrPut("cdr") },
+                Expr{ .symbol = try symtab.getOrPut("lst") },
+            }) },
+        }) },
+    });
+    defer alloc.free(body);
+    const defn: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = try symtab.getOrPut("third") },
+        Expr{ .list = params },
+        Expr{ .list = body },
+    });
+    defer alloc.free(defn);
+    _ = try vm.eval(Expr{ .list = defn }, &env);
+
+    // (third (cons 1 (cons 2 (cons 3 nil))))
+    const c: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 3 },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(c);
+    const b: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 2 },
+        Expr{ .list = c },
+    });
+    defer alloc.free(b);
+    const a: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 1 },
+        Expr{ .list = b },
+    });
+    defer alloc.free(a);
+
+    const result = try vm.eval(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("third") },
+        Expr{ .list = a },
+    }) }, &env);
+    try std.testing.expectEqual(@as(i64, 3), result.value.number);
+}
+
+test "stdlib.lisp — last" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // (defn last (lst)
+    //   (if (null? (cdr lst)) lst (last (cdr lst))))
+    const params: []Expr = try alloc.dupe(Expr, &[1]Expr{
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(params);
+    const cdrLst: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cdr") },
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(cdrLst);
+    const nullTest: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("null?") },
+        Expr{ .list = cdrLst },
+    });
+    defer alloc.free(nullTest);
+    const lastRecursive: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("last") },
+        Expr{ .list = cdrLst },
+    });
+    defer alloc.free(lastRecursive);
+    const ifBody: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("if") },
+        Expr{ .list = nullTest },
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+        Expr{ .list = lastRecursive },
+    });
+    defer alloc.free(ifBody);
+    const defn: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = try symtab.getOrPut("last") },
+        Expr{ .list = params },
+        Expr{ .list = ifBody },
+    });
+    defer alloc.free(defn);
+    _ = try vm.eval(Expr{ .list = defn }, &env);
+
+    // (last (cons 1 (cons 2 (cons 3 nil))))
+    const c: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 3 },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(c);
+    const b: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 2 },
+        Expr{ .list = c },
+    });
+    defer alloc.free(b);
+    const a: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 1 },
+        Expr{ .list = b },
+    });
+    defer alloc.free(a);
+
+    const result = try vm.eval(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("last") },
+        Expr{ .list = a },
+    }) }, &env);
+    // last returns (cons 3 nil) so we need to access car
+    try std.testing.expectEqual(@as(i64, 3), result.value.cons.car.value.number);
+}
+
+test "stdlib.lisp — sum" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // (defn sum (lst)
+    //   (if (null? lst) 0 (+ (first lst) (sum (cdr lst)))))
+    const params: []Expr = try alloc.dupe(Expr, &[1]Expr{
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(params);
+    // first
+    const firstParams: []Expr = try alloc.dupe(Expr, &[1]Expr{
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(firstParams);
+    const firstBody: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("car") },
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(firstBody);
+    const firstDefn: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = try symtab.getOrPut("first") },
+        Expr{ .list = firstParams },
+        Expr{ .list = firstBody },
+    });
+    defer alloc.free(firstDefn);
+    _ = try vm.eval(Expr{ .list = firstDefn }, &env);
+
+    // sum recursive call
+    const cdrLst: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cdr") },
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(cdrLst);
+    const sumCall: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("sum") },
+        Expr{ .list = cdrLst },
+    });
+    defer alloc.free(sumCall);
+    const plusCall: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("+") },
+        Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+            Expr{ .symbol = try symtab.getOrPut("first") },
+            Expr{ .symbol = try symtab.getOrPut("lst") },
+        }) },
+        Expr{ .list = sumCall },
+    });
+    defer alloc.free(plusCall);
+    const nullTest: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("null?") },
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(nullTest);
+    const ifBody: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("if") },
+        Expr{ .list = nullTest },
+        Expr{ .number = 0 },
+        Expr{ .list = plusCall },
+    });
+    defer alloc.free(ifBody);
+    const defn: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = try symtab.getOrPut("sum") },
+        Expr{ .list = params },
+        Expr{ .list = ifBody },
+    });
+    defer alloc.free(defn);
+    _ = try vm.eval(Expr{ .list = defn }, &env);
+
+    // (sum (cons 1 (cons 2 (cons 3 nil))))
+    const c: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 3 },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(c);
+    const b: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 2 },
+        Expr{ .list = c },
+    });
+    defer alloc.free(b);
+    const a: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 1 },
+        Expr{ .list = b },
+    });
+    defer alloc.free(a);
+
+    const result = try vm.eval(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("sum") },
+        Expr{ .list = a },
+    }) }, &env);
+    try std.testing.expectEqual(@as(i64, 6), result.value.number);
+}
+
+test "stdlib.lisp — product" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // (defn product (lst)
+    //   (if (null? lst) 1 (* (first lst) (product (cdr lst)))))
+    // first
+    const firstParams: []Expr = try alloc.dupe(Expr, &[1]Expr{
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(firstParams);
+    const firstBody: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("car") },
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(firstBody);
+    const firstDefn: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = try symtab.getOrPut("first") },
+        Expr{ .list = firstParams },
+        Expr{ .list = firstBody },
+    });
+    defer alloc.free(firstDefn);
+    _ = try vm.eval(Expr{ .list = firstDefn }, &env);
+
+    const params: []Expr = try alloc.dupe(Expr, &[1]Expr{
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(params);
+    const cdrLst: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cdr") },
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(cdrLst);
+    const productCall: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("product") },
+        Expr{ .list = cdrLst },
+    });
+    defer alloc.free(productCall);
+    const mulCall: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("*") },
+        Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+            Expr{ .symbol = try symtab.getOrPut("first") },
+            Expr{ .symbol = try symtab.getOrPut("lst") },
+        }) },
+        Expr{ .list = productCall },
+    });
+    defer alloc.free(mulCall);
+    const nullTest: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("null?") },
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(nullTest);
+    const ifBody: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("if") },
+        Expr{ .list = nullTest },
+        Expr{ .number = 1 },
+        Expr{ .list = mulCall },
+    });
+    defer alloc.free(ifBody);
+    const defn: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = try symtab.getOrPut("product") },
+        Expr{ .list = params },
+        Expr{ .list = ifBody },
+    });
+    defer alloc.free(defn);
+    _ = try vm.eval(Expr{ .list = defn }, &env);
+
+    // (product (cons 1 (cons 2 (cons 3 nil))))
+    const c: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 3 },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(c);
+    const b: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 2 },
+        Expr{ .list = c },
+    });
+    defer alloc.free(b);
+    const a: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 1 },
+        Expr{ .list = b },
+    });
+    defer alloc.free(a);
+
+    const result = try vm.eval(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("product") },
+        Expr{ .list = a },
+    }) }, &env);
+    try std.testing.expectEqual(@as(i64, 6), result.value.number);
+}
+
+test "stdlib.lisp — not" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // (defn not (x) (if x 0 1))
+    const params: []Expr = try alloc.dupe(Expr, &[1]Expr{
+        Expr{ .symbol = try symtab.getOrPut("x") },
+    });
+    defer alloc.free(params);
+    const ifBody: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("if") },
+        Expr{ .symbol = try symtab.getOrPut("x") },
+        Expr{ .number = 0 },
+        Expr{ .number = 1 },
+    });
+    defer alloc.free(ifBody);
+    const defn: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = try symtab.getOrPut("not") },
+        Expr{ .list = params },
+        Expr{ .list = ifBody },
+    });
+    defer alloc.free(defn);
+    _ = try vm.eval(Expr{ .list = defn }, &env);
+
+    const result = try vm.eval(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("not") },
+        Expr{ .nil = {} },
+    }) }, &env);
+    try std.testing.expectEqual(@as(i64, 1), result.value.number);
+}
+
+test "stdlib.lisp — atom?" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // (defn atom? (x) (if (list? x) 0 1))
+    const params: []Expr = try alloc.dupe(Expr, &[1]Expr{
+        Expr{ .symbol = try symtab.getOrPut("x") },
+    });
+    defer alloc.free(params);
+    const listQ: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("list?") },
+        Expr{ .symbol = try symtab.getOrPut("x") },
+    });
+    defer alloc.free(listQ);
+    const ifBody: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("if") },
+        Expr{ .list = listQ },
+        Expr{ .number = 0 },
+        Expr{ .number = 1 },
+    });
+    defer alloc.free(ifBody);
+    const defn: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = try symtab.getOrPut("atom?") },
+        Expr{ .list = params },
+        Expr{ .list = ifBody },
+    });
+    defer alloc.free(defn);
+    _ = try vm.eval(Expr{ .list = defn }, &env);
+
+    const result = try vm.eval(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("atom?") },
+        Expr{ .number = 5 },
+    }) }, &env);
+    try std.testing.expectEqual(@as(i64, 1), result.value.number);
+}
+
+test "stdlib.lisp — concat" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // (defn concat (& rest)
+    //   (if (null? rest)
+    //       nil
+    //       (if (list? (car rest))
+    //           (append (car rest) (apply concat (cdr rest)))
+    //           (cons (car rest) (apply concat (cdr rest))))))
+    // Simplified version: concat takes two lists (like append)
+    const params: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("a") },
+        Expr{ .symbol = try symtab.getOrPut("b") },
+    });
+    defer alloc.free(params);
+    const defn: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = try symtab.getOrPut("concat") },
+        Expr{ .list = params },
+        Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+            Expr{ .symbol = try symtab.getOrPut("append") },
+            Expr{ .symbol = try symtab.getOrPut("a") },
+            Expr{ .symbol = try symtab.getOrPut("b") },
+        }) },
+    });
+    defer alloc.free(defn);
+    _ = try vm.eval(Expr{ .list = defn }, &env);
+
+    // (concat (cons 1 nil) (cons 2 nil))
+    const list1: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 1 },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(list1);
+
+    const list2: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 2 },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(list2);
+
+    const result = try vm.eval(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("concat") },
+        Expr{ .list = list1 },
+        Expr{ .list = list2 },
+    }) }, &env);
+    try std.testing.expectEqual(@as(i64, 1), result.value.cons.car.value.number);
+    try std.testing.expectEqual(@as(i64, 2), result.value.cons.cdr.value.cons.car.value.number);
+}
+
+test "stdlib.lisp — flatten" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // First define first, since flatten depends on it
+    const firstParams: []Expr = try alloc.dupe(Expr, &[1]Expr{
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(firstParams);
+    const firstBody: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("car") },
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(firstBody);
+    const firstDefn: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = try symtab.getOrPut("first") },
+        Expr{ .list = firstParams },
+        Expr{ .list = firstBody },
+    });
+    defer alloc.free(firstDefn);
+    _ = try vm.eval(Expr{ .list = firstDefn }, &env);
+
+    // Also define atom? since flatten depends on it
+    const atomParams: []Expr = try alloc.dupe(Expr, &[1]Expr{
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(atomParams);
+    const atomBody: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("if") },
+        Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+            Expr{ .symbol = try symtab.getOrPut("list?") },
+            Expr{ .symbol = try symtab.getOrPut("lst") },
+        }) },
+        Expr{ .number = 0 },
+        Expr{ .number = 1 },
+    });
+    defer alloc.free(atomBody);
+    const atomDefn: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = try symtab.getOrPut("atom?") },
+        Expr{ .list = atomParams },
+        Expr{ .list = atomBody },
+    });
+    defer alloc.free(atomDefn);
+    _ = try vm.eval(Expr{ .list = atomDefn }, &env);
+
+    // (defn flatten (lst)
+    //   (cond
+    //     ((null? lst) nil)
+    //     ((atom? lst) (cons lst nil))
+    //     (t (append (flatten (first lst)) (flatten (rest lst))))))
+    // Simplified: use null? + car/cdr + append
+    const params: []Expr = try alloc.dupe(Expr, &[1]Expr{
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(params);
+
+    // null check
+    const nullTest: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("null?") },
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(nullTest);
+
+    // (atom? lst)
+    const atomTest: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("atom?") },
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+    });
+    defer alloc.free(atomTest);
+
+    // (cons lst nil) for atom case
+    const atomCase: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .symbol = try symtab.getOrPut("lst") },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(atomCase);
+
+    // flatten first
+    const flattenFirst: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("flatten") },
+        Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+            Expr{ .symbol = try symtab.getOrPut("car") },
+            Expr{ .symbol = try symtab.getOrPut("lst") },
+        }) },
+    });
+    defer alloc.free(flattenFirst);
+
+    // flatten cdr
+    const flattenCdr: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("flatten") },
+        Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+            Expr{ .symbol = try symtab.getOrPut("cdr") },
+            Expr{ .symbol = try symtab.getOrPut("lst") },
+        }) },
+    });
+    defer alloc.free(flattenCdr);
+
+    // append flattenFirst flattenCdr
+    const appendCase: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("append") },
+        Expr{ .list = flattenFirst },
+        Expr{ .list = flattenCdr },
+    });
+    defer alloc.free(appendCase);
+
+    // atom? check for cond
+    const ifBody: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("if") },
+        Expr{ .list = atomTest },
+        Expr{ .list = atomCase },
+        Expr{ .list = appendCase },
+    });
+    defer alloc.free(ifBody);
+
+    // null check for cond
+    const fullIf: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("if") },
+        Expr{ .list = nullTest },
+        Expr{ .nil = {} },
+        Expr{ .list = ifBody },
+    });
+    defer alloc.free(fullIf);
+
+    const defn: []Expr = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("defn") },
+        Expr{ .symbol = try symtab.getOrPut("flatten") },
+        Expr{ .list = params },
+        Expr{ .list = fullIf },
+    });
+    defer alloc.free(defn);
+    _ = try vm.eval(Expr{ .list = defn }, &env);
+
+    // (flatten (list (cons 1 nil) (cons (cons 2 nil) nil)))
+    // This is (((1) ((2)))) -> flatten -> (1 2)
+    // Simpler: (cons (cons 1 nil) (cons (cons 2 nil) nil))
+    const inner1: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 1 },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(inner1);
+
+    const inner2: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .number = 2 },
+        Expr{ .nil = {} },
+    });
+    defer alloc.free(inner2);
+
+    // (cons inner1 (cons inner2 nil)) = ((1) (2))
+    const nested: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("cons") },
+        Expr{ .list = inner1 },
+        Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+            Expr{ .symbol = try symtab.getOrPut("cons") },
+            Expr{ .list = inner2 },
+            Expr{ .nil = {} },
+        }) },
+    });
+    defer alloc.free(nested);
+
+    const result = try vm.eval(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("flatten") },
+        Expr{ .list = nested },
+    }) }, &env);
+    // Just verify flatten produces a valid list structure
+    try std.testing.expectEqual(ObjType.cons, result.type);
+    // The result should have at least one element
+    try std.testing.expectEqual(ObjType.number, result.value.cons.car.type);
+    try std.testing.expectEqual(@as(i64, 1), result.value.cons.car.value.number);
 }
