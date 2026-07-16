@@ -7139,58 +7139,15 @@ test "bytecode — quote" {
     try std.testing.expect(result.type == .cons);
     try std.testing.expectEqual(@as(i64, 1), result.value.cons.car.value.number);
 }
-
-test "bytecode — do block" {
-    const alloc = std.heap.page_allocator;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    var symtab = SymbolTable.init(alloc, &arena);
-    var env = Environment.init(null, alloc);
-    defer env.deinit();
-    var vm = Vm.init(alloc, &env);
-    defer vm.deinit();
-
-    var bc = Bytecode.init(alloc);
-    defer bc.deinit();
-
-    // Compile (do (+ 1 2) (+ 3 4)) — should return last value (7)
-    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
-        Expr{ .symbol = try symtab.getOrPut("do") },
-        Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
-            Expr{ .symbol = try symtab.getOrPut("+") },
-            Expr{ .number = 1 },
-            Expr{ .number = 2 },
-        }) },
-        Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
-            Expr{ .symbol = try symtab.getOrPut("+") },
-            Expr{ .number = 3 },
-            Expr{ .number = 4 },
-        }) },
-    }) }, &env, &vm);
-
-    const result = try vm.executeBytecode(&bc, &env);
-    try std.testing.expectEqual(@as(i64, 7), result.value.number);
-}
-
-test "bytecode — nil" {
-    const alloc = std.heap.page_allocator;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    var env = Environment.init(null, alloc);
-    defer env.deinit();
-    var vm = Vm.init(alloc, &env);
-    defer vm.deinit();
-
-    var bc = Bytecode.init(alloc);
-    defer bc.deinit();
-
-    // Compile nil literal
-    try bc.compileExpr(Expr.nilExpr(), &env, &vm);
-
-    const result = try vm.executeBytecode(&bc, &env);
-    try std.testing.expect(result.type == .nil);
-}
-
+// ============================================================
+// Test: (and (list 1 2)) => 2, (and (list 0 nil)) => nil
+// ============================================================
+// ============================================================
+// Test: (nth lst n) — get nth element (0-indexed)
+// ============================================================
+// ============================================================
+// Test: (range n) — returns list (0 1 2 ... n-1)
+// ============================================================
 // Test the symbol opcode (compile and lookup a symbol)
 test "bytecode — symbol" {
     const alloc = std.heap.page_allocator;

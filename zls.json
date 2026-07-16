@@ -1,0 +1,8 @@
+{
+    "zig_lib_path": "/home/jwthomp/.local/share/mise/installs/zig/0.16.0/lib",
+    "zig_path": "/home/jwthomp/.local/share/mise/installs/zig/0.16.0/zig",
+    "fmt": {
+        "indent_size": 4,
+        "use_tab_space": false
+    }
+}

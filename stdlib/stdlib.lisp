@@ -37,7 +37,7 @@
       nil
       (cons (car lst) (butlast (cdr lst)))))
 
-;; (concat lst1 lst2 ...) — concatenate lists (via append built-in, recursive)
+;; (concat lst1 lst2) — concatenate two lists
 (defn concat
   (list1 list2)
   (if (null? list1)
@@ -110,3 +110,39 @@
       (if (atom? (car lst))
           (cons (car lst) (flatten (cdr lst)))
           (concat (flatten (car lst)) (flatten (cdr lst))))))
+
+;; (and x1 x2 ...) — logical AND, short-circuits
+;; (if x is nil return x, else evaluate rest)
+(defn and
+  (args)
+  (if (null? args)
+      1
+      (if (null? (cdr args))
+          (car args)
+          (if (null? (car args))
+              0
+              (and (cdr args))))))
+
+;; (or x1 x2 ...) — logical OR, short-circuits
+;; (if x is not nil return x, else evaluate rest)
+(defn or
+  (args)
+  (if (null? args)
+      nil
+      (if (null? (car args))
+          (or (cdr args))
+          (car args))))
+
+;; (nth lst n) — returns the nth element (0-indexed)
+(defn nth
+  (lst n)
+  (if (= n 0)
+      (car lst)
+      (nth (cdr lst) (- n 1))))
+
+;; (range n) — returns list (0 1 2 ... n-1)
+(defn range
+  (n)
+  (if (= n 0)
+      nil
+      (append (range (- n 1)) (list (- n 1)))))
