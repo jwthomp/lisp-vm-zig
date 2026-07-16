@@ -2169,20 +2169,15 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
         }
         var tail: *LispObject = try self.allocator.create(LispObject);
         self.gcRegister(tail);
-        tail.* = switch (ast[ast.len - 1]) {
-            .nil => LispObject.nilObj(),
-            .number => |n| LispObject.numberObj(n),
-            .symbol => LispObject.nilObj(),
-            .list => LispObject.nilObj(),
-        };
+        tail.* = LispObject.nilObj();
 
-        var i: usize = ast.len - 1;
+        var i: usize = ast.len;
         while (i > 0) : (i -= 1) {
             const cell = try self.allocator.create(LispObject);
             self.gcRegister(cell);
             const cons_cell = try self.allocator.create(ConsCell);
 
-            const car_val: *LispObject = switch (ast[i - 1]) {
+            const car_val = switch (ast[i - 1]) {
                 .nil => blk: {
                     const o = try self.allocator.create(LispObject);
                     self.gcRegister(o);
@@ -6276,46 +6271,51 @@ test "example — even? inline: (even? 4) = 0 (false)" {
 // CLI Entry Point
 // ============================================================
 
-/// Write a buffer to stdout via sys_write (os.linux.write on Linux).
+/// Write a buffer to stdout.
 fn stdoutWrite(buf: []const u8) void {
     if (buf.len == 0) return;
     _ = os.linux.write(posix.STDOUT_FILENO, buf.ptr, buf.len);
 }
 
-/// Redraw the current line with `line_content`.  Clears the line first
-/// so old content cannot bleed through, and leaves the cursor at the
-/// end of the content so the user can keep editing.
+/// Redraw the current line with `line_content`.
 fn redrawHistoryLine(line_content: []const u8) void {
-    // Clear the entire line, move cursor to column 0, then print fresh content.
-    stdoutWrite("\x1b[2K\x1b[1G");
+    const pad: []const u8 = &[_]u8{' '} ** 256;
+    // Move cursor to start of line
+    stdoutWrite("\r");
+    // Print history content
     stdoutWrite(line_content);
+    // Pad with spaces if content is shorter than previous line
+    var p: usize = line_content.len;
+    while (p < 160) {
+        const to_write: usize = @min(160 - p, pad.len);
+        stdoutWrite(pad[0..to_write]);
+        p += to_write;
+    }
+    // Move cursor back to start
+    stdoutWrite("\r");
 }
 
 pub fn replLoop(vm: *Vm, env: *Environment) void {
-    // ---- Terminal raw/cbreak mode setup (only when stdin is a tty) ----
-    // Try to get terminal settings — if it fails, stdin is not a tty.
-    var in_tty: bool = false;
-    var saved_termios: std.posix.termios = undefined;
-    if (posix.tcgetattr(posix.STDIN_FILENO) catch null) |term| {
-        saved_termios = term;
-        in_tty = true;
+    // ---- Terminal raw/cbreak mode setup ----
+    // tcgetattr returns error{NotATerminal,...} if stdin is not a tty.
+    const termios_result = posix.tcgetattr(posix.STDIN_FILENO) catch null;
+    if (termios_result) |saved_termios| {
+        defer posix.tcsetattr(posix.STDIN_FILENO, .NOW, saved_termios) catch {};
 
-        // Set stdin to cbreak mode: disable canonical mode so escape sequences
-        // arrive immediately, keep ECHO so the user sees what they type.
         var raw_termios = saved_termios;
         raw_termios.lflag.ICANON = false;
         raw_termios.lflag.ECHO = false;
         raw_termios.cc[5] = 0; // VTIME = 0
         raw_termios.cc[6] = 1; // VMIN = 1
-        _ = posix.tcsetattr(posix.STDIN_FILENO, .NOW, raw_termios) catch {
-            debugPrint("Warning: could not set terminal to raw mode\n", .{});
-            in_tty = false;
-        };
+        if (posix.tcsetattr(posix.STDIN_FILENO, .NOW, raw_termios) catch null == null) {
+            // Success — continue
+        } else {
+            debugPrint("Warning: could not set terminal to cbreak mode\n", .{});
+            return; // Can't navigate without cbreak mode
+        }
     } else {
-        debugPrint("Warning: stdin is not a tty, running without raw mode\n", .{});
-    }
-    if (in_tty) {
-        defer posix.tcsetattr(posix.STDIN_FILENO, .NOW, saved_termios) catch {};
+        debugPrint("Warning: stdin is not a tty\n", .{});
+        return; // Can't navigate without cbreak mode
     }
     // ---- End terminal raw mode setup ----
 
