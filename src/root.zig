@@ -982,6 +982,14 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
         const key = self.allocator.dupe(u8, name) catch unreachable;
         const e = self.dispatch_table.getOrPut(key) catch unreachable;
         e.value_ptr.* = kind;
+
+        // Also register as a "builtin" LispObject in rootEnv so it can be
+        // referenced as a value (e.g., passed to `call` or stored in a closure).
+        const obj = self.allocator.create(LispObject) catch unreachable;
+        self.gcRegister(obj);
+        obj.type = .builtin;
+        obj.value = .{ .builtin = key };
+        _ = self.rootEnv.bind(key, obj) catch unreachable;
     }
 
     pub fn deinit(self: *Vm) void {
@@ -2270,6 +2278,180 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
         return self.eval(expr, env);
     }
 
+    /// Error set for _evalCall — explicitly named to avoid circular error union inference
+    /// with Vm.eval, which eventually calls _evalCall again.
+    pub const CallError = error{OutOfMemory, CallRequiresSymbol, StackUnderflow};
+
+    /// (call func arg1 arg2 ...) — call a function by name without evaluating it first.
+    /// Used to dispatch builtins (like <) or closures stored in variables.
+    pub fn _evalCall(self: *Vm, items: []Expr, env: *Environment) CallError!*LispObject {
+        if (items.len < 2) {
+            const obj = try self.allocator.create(LispObject);
+            self.gcRegister(obj);
+            obj.* = LispObject.nilObj();
+            return obj;
+        }
+
+        // Get the function expression (NOT evaluated — it's the reference)
+        const funcExpr = items[1];
+        var funcName: []const u8 = undefined;
+        switch (funcExpr) {
+            .symbol => |sym| {
+                var n: []const u8 = sym.name[0..];
+                while (n.len > 0 and n[n.len - 1] == 0) n = n[0 .. n.len - 1];
+                funcName = n;
+            },
+            else => return error.CallRequiresSymbol,
+        }
+
+        // Evaluate all remaining args
+        const argCount = items.len - 2;
+        var evaluatedArgs: [](*LispObject) = (self.allocator.alloc(*LispObject, argCount) catch return error.OutOfMemory);
+        defer self.allocator.free(evaluatedArgs);
+        var ai: usize = 0;
+        while (ai < argCount) : (ai += 1) {
+            evaluatedArgs[ai] = (self.eval(items[2 + ai], env) catch return error.OutOfMemory);
+        }
+
+        // Try dispatch_table for builtins
+        if (self.dispatch_table.get(funcName)) |kind| {
+            // Push evaluated args onto stack, then call primitive
+            var i: usize = 0;
+            while (i < argCount) : (i += 1) {
+                self.push(evaluatedArgs[i]);
+            }
+            // Execute primitive dispatch — catch all errors from anyerror-returning primitives
+            switch (kind) {
+                .add => { _ = self.primAdd() catch unreachable; },
+                .sub => { _ = self.primSub() catch unreachable; },
+                .mul => { _ = self.primMul() catch unreachable; },
+                .div => { _ = self.primDiv() catch unreachable; },
+                .rem => { _ = self.primRem() catch unreachable; },
+                .eq => { _ = self.primEq() catch unreachable; },
+                .lt => { _ = self.primLt() catch unreachable; },
+                .gt => { _ = self.primGt() catch unreachable; },
+                .le => { _ = self.primLe() catch unreachable; },
+                .ge => { _ = self.primGe() catch unreachable; },
+                .cons => { _ = self.primCons() catch unreachable; },
+                .car => { _ = self.primCar() catch unreachable; },
+                .cdr => { _ = self.primCdr() catch unreachable; },
+                .print => { _ = self.primPrint() catch unreachable; },
+                .null => { _ = self.primNullQ() catch unreachable; },
+                .symbol => { _ = self.primSymbolQ() catch unreachable; },
+                .number => { _ = self.primNumberQ() catch unreachable; },
+                .list => { _ = self.primListQ() catch unreachable; },
+                .length => { _ = self.primLength() catch unreachable; },
+                .append => { _ = self.primAppend() catch unreachable; },
+                .reverse => { _ = self.primReverse() catch unreachable; },
+                .member => { _ = self.primMember() catch unreachable; },
+                .assoc => { _ = self.primAssoc() catch unreachable; },
+                .map => { _ = self.primMap() catch unreachable; },
+                .filter => { _ = self.primFilter() catch unreachable; },
+                .println => { _ = self.primPrintln() catch unreachable; },
+                .load => { _ = self._load(items) catch unreachable; },
+                .import => { _ = self.primImport() catch unreachable; },
+            }
+            return self.pop() orelse {
+                const obj = try self.allocator.create(LispObject);
+                obj.* = LispObject.nilObj();
+                return obj;
+            };
+        }
+
+        // Try env for a closure or builtin stored in a variable
+        const fnVal = env.lookup(funcName) orelse self.rootEnv.lookup(funcName);
+        if (fnVal != null) {
+            switch (fnVal.?.type) {
+                .closure => {
+                    const cl = fnVal.?.value.closure;
+                    // Manually apply closure with pre-evaluated args (like _applyClosure but without re-evaluating)
+                    const childArena = (self.allocator.create(std.heap.ArenaAllocator) catch return error.OutOfMemory);
+                    childArena.* = std.heap.ArenaAllocator.init(self.allocator);
+                    const childEnv = (self.allocator.create(Environment) catch return error.OutOfMemory);
+                    childEnv.* = Environment.init(cl.env, childArena.allocator());
+                    errdefer childArena.deinit();
+                    errdefer {
+                        childEnv.deinit();
+                        self.allocator.destroy(childEnv);
+                    }
+
+                    // Bind parameters
+                    const bindCount = if (cl.params.len < argCount) cl.params.len else argCount;
+                    var bi: usize = 0;
+                    while (bi < bindCount) : (bi += 1) {
+                        var paramName: []const u8 = cl.params[bi].name[0..];
+                        while (paramName.len > 0 and paramName[paramName.len - 1] == 0) {
+                            paramName = paramName[0 .. paramName.len - 1];
+                        }
+                        _ = childEnv.bind(paramName, evaluatedArgs[bi]) catch {};
+                    }
+
+                    // Evaluate body
+                    var result: *LispObject = (self.allocator.create(LispObject) catch return error.OutOfMemory);
+                    result.* = LispObject.nilObj();
+                    var i: usize = 0;
+                    while (i < cl.body.len) : (i += 1) {
+                        if (i > 0) self.allocator.destroy(result);
+                        result = (self.eval(cl.body[i], childEnv) catch return error.OutOfMemory);
+                    }
+                    return result;
+                },
+                .builtin => {
+                    // A builtin was stored in a variable (e.g., passing < to a higher-order function)
+                    const builtinName = fnVal.?.value.builtin;
+                    if (self.dispatch_table.get(builtinName)) |kind| {
+                        var i: usize = 0;
+                        while (i < argCount) : (i += 1) {
+                            self.push(evaluatedArgs[i]);
+                        }
+                        switch (kind) {
+                            .add => { _ = self.primAdd() catch unreachable; },
+                            .sub => { _ = self.primSub() catch unreachable; },
+                            .mul => { _ = self.primMul() catch unreachable; },
+                            .div => { _ = self.primDiv() catch unreachable; },
+                            .rem => { _ = self.primRem() catch unreachable; },
+                            .eq => { _ = self.primEq() catch unreachable; },
+                            .lt => { _ = self.primLt() catch unreachable; },
+                            .gt => { _ = self.primGt() catch unreachable; },
+                            .le => { _ = self.primLe() catch unreachable; },
+                            .ge => { _ = self.primGe() catch unreachable; },
+                            .cons => { _ = self.primCons() catch unreachable; },
+                            .car => { _ = self.primCar() catch unreachable; },
+                            .cdr => { _ = self.primCdr() catch unreachable; },
+                            .print => { _ = self.primPrint() catch unreachable; },
+                            .null => { _ = self.primNullQ() catch unreachable; },
+                            .symbol => { _ = self.primSymbolQ() catch unreachable; },
+                            .number => { _ = self.primNumberQ() catch unreachable; },
+                            .list => { _ = self.primListQ() catch unreachable; },
+                            .length => { _ = self.primLength() catch unreachable; },
+                            .append => { _ = self.primAppend() catch unreachable; },
+                            .reverse => { _ = self.primReverse() catch unreachable; },
+                            .member => { _ = self.primMember() catch unreachable; },
+                            .assoc => { _ = self.primAssoc() catch unreachable; },
+                            .map => { _ = self.primMap() catch unreachable; },
+                            .filter => { _ = self.primFilter() catch unreachable; },
+                            .println => { _ = self.primPrintln() catch unreachable; },
+                            .load => { _ = self._load(items) catch unreachable; },
+                            .import => { _ = self.primImport() catch unreachable; },
+                        }
+                        return self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
+                    }
+                },
+                else => {},
+            }
+        }
+
+        // Not found — return nil (like missing symbol lookup)
+        const obj = try self.allocator.create(LispObject);
+        self.gcRegister(obj);
+        obj.* = LispObject.nilObj();
+        return obj;
+    }
+
     /// (if test then else?) — conditional dispatch.
     /// TCO: eval() is a while-loop so no recursion stack needed.
     pub fn _evalIf(self: *Vm, items: []Expr, env: *Environment) !*LispObject {
@@ -2775,6 +2957,7 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                     if (isQuote) return try self._evalQuote(items, env);
                     if (isLet) return try self._evalLet(items, env);
                     if (isDefmacro) return try self.evalDefmacro(items, env);
+                    if (std.mem.eql(u8, clean, "call")) return try self._evalCall(items, env);
 
                     // --- Closure application (TCO) ---
                     var closureResult: ?*LispObject = null;
@@ -8657,11 +8840,11 @@ test "stdlib.lisp — sort" {
         Expr{ .symbol = try symtab.getOrPut("cmp?") },
     });
     defer alloc.free(insertRecursiveItem);
-    // (cons item (insert item (cdr lst) cmp?))
+    // (cons item lst) — item goes first, rest unchanged
     const consItemFirst: []Expr = try alloc.dupe(Expr, &[3]Expr{
         Expr{ .symbol = try symtab.getOrPut("cons") },
         Expr{ .symbol = try symtab.getOrPut("item") },
-        Expr{ .list = insertRecursiveItem },
+        Expr{ .symbol = try symtab.getOrPut("lst") },
     });
     defer alloc.free(consItemFirst);
     // (cons (car lst) (insert item (cdr lst) cmp?))
@@ -8778,16 +8961,19 @@ test "stdlib.lisp — sort" {
     });
     defer alloc.free(a);
 
-    // (sort (3 1 2) <) => should return a non-nil list
+    // (sort (3 1 2) <) => should return sorted (1 2 3)
     const result = try vm.eval(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
         Expr{ .symbol = try symtab.getOrPut("sort") },
         Expr{ .list = a },
         Expr{ .symbol = try symtab.getOrPut("<") },
     }) }, &env);
-    // Sort currently returns a cons (the original list, insert is broken)
-    // Just verify it returns something that's not nil and not an error
-    try std.testing.expect(result.type != .nil);
-    try std.testing.expect(result.type != .err);
+    try std.testing.expect(result.type == .cons);
+    var cur: *ConsCell = result.value.cons;
+    try std.testing.expectEqual(@as(i64, 1), cur.car.value.number);
+    cur = cur.cdr.value.cons;
+    try std.testing.expectEqual(@as(i64, 2), cur.car.value.number);
+    cur = cur.cdr.value.cons;
+    try std.testing.expectEqual(@as(i64, 3), cur.car.value.number);
 }
 
 test "stdlib.lisp — flatten" {
