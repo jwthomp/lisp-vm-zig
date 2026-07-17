@@ -238,10 +238,10 @@ pub const Parser = struct {
                 self.pos += 1;
                 // 'expr → (quote expr)
                 const inner = self.parseSExpr(depth + 1) catch {
-                    std.debug.print("quote: parse inner failed, pos={d}\n", .{self.pos});
+                    debugPrint("quote: parse inner failed, pos={d}\n", .{self.pos});
                     return Expr.nilExpr();
                 };
-                std.debug.print("quote: inner={any}, pos after={d}\n", .{inner, self.pos});
+                debugPrint("quote: inner={any}, pos after={d}\n", .{inner, self.pos});
                 const quote_items: []Expr = try self.arena.allocator().dupe(
                     Expr, &[2]Expr{
                         Expr{ .symbol = try self.symtab.getOrPut("quote") },
@@ -411,6 +411,17 @@ pub const Bytecode = struct {
         self.constants.deinit(self.allocator);
     }
 
+    /// Clear all bytecode data, retaining allocated capacity for reuse.
+    pub fn clear(self: *Bytecode) void {
+        var i: usize = 0;
+        while (i < self.closure_bodies.items.len) : (i += 1) {
+            self.closure_bodies.items[i].clearRetainingCapacity();
+        }
+        self.closure_bodies.clearRetainingCapacity();
+        self.ops.clearRetainingCapacity();
+        self.constants.clearRetainingCapacity();
+    }
+
     /// Emit a single opcode byte
     fn emitOp(self: *Bytecode, op: Opcode) void {
         self.ops.append(self.allocator, @intFromEnum(op)) catch unreachable;
@@ -462,12 +473,12 @@ pub const Bytecode = struct {
     /// Add a symbol to constants and return its index
     fn emitConstRef(self: *Bytecode, sym: *Symbol) u32 {
         const idx = @as(u32, @intCast(self.constants.items.len));
-        std.debug.print("emitConstRef: creating symbol object for '{s}'\n", .{sym.name[0..]});
+        debugPrint("emitConstRef: creating symbol object for '{s}'\n", .{sym.name[0..]});
         const obj = self.allocator.create(LispObject) catch unreachable;
         obj.* = LispObject.symbolObj(sym);
-        std.debug.print("emitConstRef: appending to constants, len before={d}, len after={d}\n", .{ idx, idx + 1 });
+        debugPrint("emitConstRef: appending to constants, len before={d}, len after={d}\n", .{ idx, idx + 1 });
         self.constants.appendAssumeCapacity(obj);
-        std.debug.print("emitConstRef: constants.items.len = {d}\n", .{self.constants.items.len});
+        debugPrint("emitConstRef: constants.items.len = {d}\n", .{self.constants.items.len});
         return idx;
     }
 
@@ -658,10 +669,10 @@ pub const Bytecode = struct {
     }
 
     fn compileDefn(self: *Bytecode, items: []Expr, env: *Environment, vm: *Vm) !void {
-        std.debug.print("compileDefn: entering, ops.len={d}\n", .{self.ops.items.len});
+        debugPrint("compileDefn: entering, ops.len={d}\n", .{self.ops.items.len});
         // (defn name (params) body...)
         const nameIdx = vm._addConstantExpr(items[1]);
-        std.debug.print("compileDefn: nameIdx={d}, ops.len={d}\n", .{nameIdx, self.ops.items.len});
+        debugPrint("compileDefn: nameIdx={d}, ops.len={d}\n", .{nameIdx, self.ops.items.len});
         const paramsExpr = items[2];
         const bodyExprs = items[3..];
         try self.compileFn(paramsExpr, bodyExprs, env, vm);
@@ -816,13 +827,15 @@ pub const Bytecode = struct {
                 // Check if this is a known builtin via dispatch table
                 var clean: []const u8 = sym.name[0..];
                 while (clean.len > 0 and clean[clean.len - 1] == 0) clean = clean[0 .. clean.len - 1];
+                debugPrint("compileCall: checking builtin '{s}'\n", .{clean});
                 if (vm.dispatch_table.get(clean)) |_| {
                     // It's a builtin - add to bytecode constants
                     const nameIdx = self.emitConstRef(sym);
-                    std.debug.print("emitConstRef: added symbol '{s}' at idx {d}\n", .{ sym.name[0..], nameIdx });
+                    debugPrint("emitConstRef: added symbol '{s}' at idx {d}\n", .{ sym.name[0..], nameIdx });
                     self.emitConstVal(nameIdx);
                 } else {
                     // Not a builtin — regular symbol lookup
+                    debugPrint("compileCall: '{s}' not found in dispatch_table\n", .{clean});
                     try self.compileExpr(head, env, vm);
                 }
             },
@@ -840,9 +853,11 @@ pub const Bytecode = struct {
 /// Builtin dispatch enum — avoids function pointer circular references.
 pub const BuiltinKind = enum {
     add, sub, mul, div, eq, lt, gt, le, ge, rem,
+    // Bitwise
+    bit_and, bit_or, bit_not, bit_shl, bit_shr,
     cons, car, cdr,
     print,
-    null, symbol, number, list,
+    null, symbol, number, list, not,
     length,
     append, reverse, member, assoc, map, filter,
     println, load, import,
@@ -958,11 +973,17 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
         vm._registerBuiltin("<=", .le);
         vm._registerBuiltin(">=", .ge);
         vm._registerBuiltin("rem", .rem);
+        vm._registerBuiltin("bit-and", .bit_and);
+        vm._registerBuiltin("bit-or", .bit_or);
+        vm._registerBuiltin("bit-not", .bit_not);
+        vm._registerBuiltin("bit-shl", .bit_shl);
+        vm._registerBuiltin("bit-shr", .bit_shr);
         vm._registerBuiltin("cons", .cons);
         vm._registerBuiltin("car", .car);
         vm._registerBuiltin("cdr", .cdr);
         vm._registerBuiltin("print", .print);
         vm._registerBuiltin("null?", .null);
+        vm._registerBuiltin("not", .not);
         vm._registerBuiltin("symbol?", .symbol);
         vm._registerBuiltin("number?", .number);
         vm._registerBuiltin("list?", .list);
@@ -1289,6 +1310,60 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
         self.push(result);
     }
 
+    /// (bit-and a b) — bitwise AND
+    pub fn primBitAnd(self: *Vm) !void {
+        const b = self.pop() orelse return error.StackUnderflow;
+        const a = self.pop() orelse return error.StackUnderflow;
+        if (a.type != .number or b.type != .number) return error.TypeError;
+        const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
+        result.* = LispObject.numberObj(a.value.number & b.value.number);
+        self.push(result);
+    }
+
+    /// (bit-or a b) — bitwise OR
+    pub fn primBitOr(self: *Vm) !void {
+        const b = self.pop() orelse return error.StackUnderflow;
+        const a = self.pop() orelse return error.StackUnderflow;
+        if (a.type != .number or b.type != .number) return error.TypeError;
+        const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
+        result.* = LispObject.numberObj(a.value.number | b.value.number);
+        self.push(result);
+    }
+
+    /// (bit-not n) — bitwise NOT
+    pub fn primBitNot(self: *Vm) !void {
+        const obj = self.pop() orelse return error.StackUnderflow;
+        if (obj.type != .number) return error.TypeError;
+        const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
+        result.* = LispObject.numberObj(~obj.value.number);
+        self.push(result);
+    }
+
+    /// (bit-shl n count) — bitwise shift left
+    pub fn primBitShl(self: *Vm) !void {
+        const count = self.pop() orelse return error.StackUnderflow;
+        const obj = self.pop() orelse return error.StackUnderflow;
+        if (obj.type != .number or count.type != .number) return error.TypeError;
+        const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
+        result.* = LispObject.numberObj(obj.value.number << @intCast(count.value.number));
+        self.push(result);
+    }
+
+    /// (bit-shr n count) — bitwise shift right (arithmetic)
+    pub fn primBitShr(self: *Vm) !void {
+        const count = self.pop() orelse return error.StackUnderflow;
+        const obj = self.pop() orelse return error.StackUnderflow;
+        if (obj.type != .number or count.type != .number) return error.TypeError;
+        const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
+        result.* = LispObject.numberObj(obj.value.number >> @intCast(count.value.number));
+        self.push(result);
+    }
+
     pub fn primEq(self: *Vm) !void {
         const b = self.pop() orelse return error.StackUnderflow;
         const a = self.pop() orelse return error.StackUnderflow;
@@ -1402,6 +1477,15 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
         } else {
             result.* = LispObject.numberObj(0);
         }
+        self.push(result);
+    }
+
+    /// (not x) — returns 1 if x is nil, 0 otherwise
+    pub fn primNot(self: *Vm) !void {
+        const obj = self.pop() orelse return error.StackUnderflow;
+        const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
+        result.* = if (obj.type == .nil) LispObject.numberObj(1) else LispObject.numberObj(0);
         self.push(result);
     }
 
@@ -2432,6 +2516,11 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                 .mul => { _ = self.primMul() catch unreachable; },
                 .div => { _ = self.primDiv() catch unreachable; },
                 .rem => { _ = self.primRem() catch unreachable; },
+                .bit_and => { _ = self.primBitAnd() catch unreachable; },
+                .bit_or => { _ = self.primBitOr() catch unreachable; },
+                .bit_not => { _ = self.primBitNot() catch unreachable; },
+                .bit_shl => { _ = self.primBitShl() catch unreachable; },
+                .bit_shr => { _ = self.primBitShr() catch unreachable; },
                 .eq => { _ = self.primEq() catch unreachable; },
                 .lt => { _ = self.primLt() catch unreachable; },
                 .gt => { _ = self.primGt() catch unreachable; },
@@ -2442,6 +2531,7 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                 .cdr => { _ = self.primCdr() catch unreachable; },
                 .print => { _ = self.primPrint() catch unreachable; },
                 .null => { _ = self.primNullQ() catch unreachable; },
+                .not => { _ = self.primNot() catch unreachable; },
                 .symbol => { _ = self.primSymbolQ() catch unreachable; },
                 .number => { _ = self.primNumberQ() catch unreachable; },
                 .list => { _ = self.primListQ() catch unreachable; },
@@ -2522,6 +2612,11 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                             .mul => { _ = self.primMul() catch unreachable; },
                             .div => { _ = self.primDiv() catch unreachable; },
                             .rem => { _ = self.primRem() catch unreachable; },
+                            .bit_and => { _ = self.primBitAnd() catch unreachable; },
+                            .bit_or => { _ = self.primBitOr() catch unreachable; },
+                            .bit_not => { _ = self.primBitNot() catch unreachable; },
+                            .bit_shl => { _ = self.primBitShl() catch unreachable; },
+                            .bit_shr => { _ = self.primBitShr() catch unreachable; },
                             .eq => { _ = self.primEq() catch unreachable; },
                             .lt => { _ = self.primLt() catch unreachable; },
                             .gt => { _ = self.primGt() catch unreachable; },
@@ -2532,6 +2627,7 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                             .cdr => { _ = self.primCdr() catch unreachable; },
                             .print => { _ = self.primPrint() catch unreachable; },
                             .null => { _ = self.primNullQ() catch unreachable; },
+                            .not => { _ = self.primNot() catch unreachable; },
                             .symbol => { _ = self.primSymbolQ() catch unreachable; },
                             .number => { _ = self.primNumberQ() catch unreachable; },
                             .list => { _ = self.primListQ() catch unreachable; },
@@ -3139,6 +3235,11 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                                 .mul => try self.primMul(),
                                 .div => try self.primDiv(),
                                 .rem => try self.primRem(),
+                                .bit_and => try self.primBitAnd(),
+                                .bit_or => try self.primBitOr(),
+                                .bit_not => try self.primBitNot(),
+                                .bit_shl => try self.primBitShl(),
+                                .bit_shr => try self.primBitShr(),
                                 .eq => try self.primEq(),
                                 .lt => try self.primLt(),
                                 .gt => try self.primGt(),
@@ -3149,6 +3250,7 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                                 .cdr => try self.primCdr(),
                                 .print => try self.primPrint(),
                                 .null => try self.primNullQ(),
+                                .not => try self.primNot(),
                                 .symbol => try self.primSymbolQ(),
                                 .number => try self.primNumberQ(),
                                 .list => try self.primListQ(),
@@ -3237,17 +3339,17 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                     else
                         bc.getConstant(idx);
                     if (symObj == null) {
-                        std.debug.print("const_val: constant not found at idx {d}\n", .{idx});
+                        debugPrint("const_val: constant not found at idx {d}\n", .{idx});
                         const obj = try self.allocator.create(LispObject);
                         self.gcRegister(obj);
                         obj.* = LispObject.nilObj();
                         self.push(obj);
                         continue;
                     }
-                    std.debug.print("const_val: found constant, type={s}\n", .{@tagName(symObj.?.type)});
+                    debugPrint("const_val: found constant, type={s}\n", .{@tagName(symObj.?.type)});
                     // If it's a builtin name, push the builtin object
                     if (self.dispatch_table.get(symObj.?.value.symbol.name[0..])) |_| {
-                        std.debug.print("const_val: creating builtin object for '{s}'\n", .{symObj.?.value.symbol.name[0..]});
+                        debugPrint("const_val: creating builtin object for '{s}'\n", .{symObj.?.value.symbol.name[0..]});
                         const builtinObj = try self.allocator.create(LispObject);
                         self.gcRegister(builtinObj);
                         builtinObj.* = LispObject{
@@ -3275,9 +3377,9 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                     const idx: u32 = @as(u32, bc.ops.items[pc]) | (@as(u32, bc.ops.items[pc + 1]) << 8) |
                         (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
                     pc += 4;
-                    std.debug.print("const_val: idx={d}, bc.constants.items.len={d}\n", .{ idx, bc.constants.items.len });
+                    debugPrint("const_val: idx={d}, bc.constants.items.len={d}\n", .{ idx, bc.constants.items.len });
                     const val = bc.getConstant(idx) orelse {
-                        std.debug.print("const_val: constant not found at idx {d}\n", .{idx});
+                        debugPrint("const_val: constant not found at idx {d}\n", .{idx});
                         const obj = try self.allocator.create(LispObject);
                         self.gcRegister(obj);
                         obj.* = LispObject.nilObj();
@@ -3328,7 +3430,7 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                     else
                         bc.getConstant(idx);
                     if (symObj == null) return error.UndefinedVariable;
-                    std.debug.print("DEFN: binding {s} = type={s}\n", .{
+                    debugPrint("DEFN: binding {s} = type={s}\n", .{
                         symObj.?.value.symbol.name[0..],
                         @tagName(val.type),
                     });
@@ -3385,9 +3487,11 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                     pc += 1;
                     // Pop function (it's on top of args)
                     const fnVal = self.pop() orelse return error.StackUnderflow;
+                    debugPrint("EXEC call: fnVal.type={s}, argCount={d}\n", .{ @tagName(fnVal.type), argCount });
                     // Apply function
                     switch (fnVal.value) {
                         .builtin => |name| {
+                            debugPrint("EXEC builtin name='{s}'\n", .{name[0..]});
                             // Dispatch to builtin
                             if (self.dispatch_table.get(name)) |kind| {
                                 switch (kind) {
@@ -3396,6 +3500,11 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                                     .mul => try self.primMul(),
                                     .div => try self.primDiv(),
                                     .rem => try self.primRem(),
+                                    .bit_and => try self.primBitAnd(),
+                                    .bit_or => try self.primBitOr(),
+                                    .bit_not => try self.primBitNot(),
+                                    .bit_shl => try self.primBitShl(),
+                                    .bit_shr => try self.primBitShr(),
                                     .eq => try self.primEq(),
                                     .lt => try self.primLt(),
                                     .gt => try self.primGt(),
@@ -3406,6 +3515,7 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                                     .cdr => try self.primCdr(),
                                     .print => try self.primPrint(),
                                     .null => try self.primNullQ(),
+                                    .not => try self.primNot(),
                                     .symbol => try self.primSymbolQ(),
                                     .number => try self.primNumberQ(),
                                     .list => try self.primListQ(),
@@ -3416,6 +3526,12 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                                     .assoc => try self.primAssoc(),
                                     .map => try self.primMap(),
                                     .filter => try self.primFilter(),
+                                    .equal => try self.primEqual(),
+                                    .even => try self.primEven(),
+                                    .odd => try self.primOdd(),
+                                    .positive => try self.primPositive(),
+                                    .negative => try self.primNegative(),
+                                    .type_of => try self.primTypeOf(),
                                     .println => try self.primPrintln(),
                                     else => {},
                                 }
@@ -3445,7 +3561,7 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                             while (argIdx < argCount) {
                                 if (paramPtr) |p| {
                                     const paramName = p.value.symbol.name[0..];
-                                    std.debug.print("  binding {s} = {s}\n", .{ paramName, @tagName(args[argIdx].type) });
+                                    debugPrint("  binding {s} = {s}\n", .{ paramName, @tagName(args[argIdx].type) });
                                     try childEnv.bind(paramName, args[argIdx]);
                                     paramPtr = p.next;
                                 }
@@ -3555,7 +3671,11 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                                                             .sub => try self.primSub(),
                                                             .mul => try self.primMul(),
                                                             .div => try self.primDiv(),
-                                                            .rem => try self.primRem(),
+                                                            .bit_and => try self.primBitAnd(),
+                                                            .bit_or => try self.primBitOr(),
+                                                            .bit_not => try self.primBitNot(),
+                                                            .bit_shl => try self.primBitShl(),
+                                                            .bit_shr => try self.primBitShr(),
                                                             .eq => try self.primEq(),
                                                             .lt => try self.primLt(),
                                                             .gt => try self.primGt(),
@@ -3566,6 +3686,7 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                                                             .cdr => try self.primCdr(),
                                                             .print => try self.primPrint(),
                                                             .null => try self.primNullQ(),
+                                                            .not => try self.primNot(),
                                                             .symbol => try self.primSymbolQ(),
                                                             .number => try self.primNumberQ(),
                                                             .list => try self.primListQ(),
@@ -3575,6 +3696,12 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                                                             .member => try self.primMember(),
                                                             .assoc => try self.primAssoc(),
                                                             .map => try self.primMap(),
+                                                            .equal => try self.primEqual(),
+                                                            .even => try self.primEven(),
+                                                            .odd => try self.primOdd(),
+                                                            .positive => try self.primPositive(),
+                                                            .negative => try self.primNegative(),
+                                                            .type_of => try self.primTypeOf(),
                                                             .filter => try self.primFilter(),
                                                             .println => try self.primPrintln(),
                                                             else => {},
@@ -3690,7 +3817,11 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                                                             .sub => try self.primSub(),
                                                             .mul => try self.primMul(),
                                                             .div => try self.primDiv(),
-                                                            .rem => try self.primRem(),
+                                                            .bit_and => try self.primBitAnd(),
+                                                            .bit_or => try self.primBitOr(),
+                                                            .bit_not => try self.primBitNot(),
+                                                            .bit_shl => try self.primBitShl(),
+                                                            .bit_shr => try self.primBitShr(),
                                                             .eq => try self.primEq(),
                                                             .lt => try self.primLt(),
                                                             .gt => try self.primGt(),
@@ -3701,6 +3832,7 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                                                             .cdr => try self.primCdr(),
                                                             .print => try self.primPrint(),
                                                             .null => try self.primNullQ(),
+                                                            .not => try self.primNot(),
                                                             .symbol => try self.primSymbolQ(),
                                                             .number => try self.primNumberQ(),
                                                             .list => try self.primListQ(),
@@ -3709,7 +3841,12 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                                                             .reverse => try self.primReverse(),
                                                             .member => try self.primMember(),
                                                             .assoc => try self.primAssoc(),
-                                                            .map => try self.primMap(),
+                                                            .equal => try self.primEqual(),
+                                                            .even => try self.primEven(),
+                                                            .odd => try self.primOdd(),
+                                                            .positive => try self.primPositive(),
+                                                            .negative => try self.primNegative(),
+                                                            .type_of => try self.primTypeOf(),
                                                             .filter => try self.primFilter(),
                                                             .println => try self.primPrintln(),
                                                             else => {},
@@ -3863,6 +4000,11 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                                     .mul => try self.primMul(),
                                     .div => try self.primDiv(),
                                     .rem => try self.primRem(),
+                                    .bit_and => try self.primBitAnd(),
+                                    .bit_or => try self.primBitOr(),
+                                    .bit_not => try self.primBitNot(),
+                                    .bit_shl => try self.primBitShl(),
+                                    .bit_shr => try self.primBitShr(),
                                     .eq => try self.primEq(),
                                     .lt => try self.primLt(),
                                     .gt => try self.primGt(),
@@ -3873,6 +4015,7 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                                     .cdr => try self.primCdr(),
                                     .print => try self.primPrint(),
                                     .null => try self.primNullQ(),
+                                    .not => try self.primNot(),
                                     .symbol => try self.primSymbolQ(),
                                     .number => try self.primNumberQ(),
                                     .list => try self.primListQ(),
@@ -3880,7 +4023,12 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                                     .append => try self.primAppend(),
                                     .reverse => try self.primReverse(),
                                     .member => try self.primMember(),
-                                    .assoc => try self.primAssoc(),
+                                    .equal => try self.primEqual(),
+                                    .even => try self.primEven(),
+                                    .odd => try self.primOdd(),
+                                    .positive => try self.primPositive(),
+                                    .negative => try self.primNegative(),
+                                    .type_of => try self.primTypeOf(),
                                     .map => try self.primMap(),
                                     .filter => try self.primFilter(),
                                     .println => try self.primPrintln(),
@@ -3934,11 +4082,17 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
         if (std.mem.eql(u8, name, "<=")) return try self.primLe();
         if (std.mem.eql(u8, name, ">=")) return try self.primGe();
         if (std.mem.eql(u8, name, "rem")) return try self.primRem();
+        if (std.mem.eql(u8, name, "bit-and")) return try self.primBitAnd();
+        if (std.mem.eql(u8, name, "bit-or")) return try self.primBitOr();
+        if (std.mem.eql(u8, name, "bit-not")) return try self.primBitNot();
+        if (std.mem.eql(u8, name, "bit-shl")) return try self.primBitShl();
+        if (std.mem.eql(u8, name, "bit-shr")) return try self.primBitShr();
         if (std.mem.eql(u8, name, "cons")) return try self.primCons();
         if (std.mem.eql(u8, name, "car")) return try self.primCar();
         if (std.mem.eql(u8, name, "cdr")) return try self.primCdr();
         if (std.mem.eql(u8, name, "print")) return try self.primPrint();
         if (std.mem.eql(u8, name, "null?")) return try self.primNullQ();
+        if (std.mem.eql(u8, name, "not")) return try self.primNot();
         if (std.mem.eql(u8, name, "symbol?")) return try self.primSymbolQ();
         if (std.mem.eql(u8, name, "number?")) return try self.primNumberQ();
         if (std.mem.eql(u8, name, "list?")) return try self.primListQ();
@@ -6650,6 +6804,8 @@ pub fn replLoop(vm: *Vm, env: *Environment) void {
     }
     // ---- End terminal raw mode setup ----
 
+    debugPrint("lisp-vm {s}\nType (exit) or (quit) to leave.\n", .{version});
+
     const max_history: usize = 100;
 
     // History buffer: unmanaged array of line strings.
@@ -6783,7 +6939,10 @@ pub fn replLoop(vm: *Vm, env: *Environment) void {
 
         var trimmed = input;
         while (trimmed.len > 0 and (trimmed[0] == ' ' or trimmed[0] == '\t')) trimmed = trimmed[1..];
+
+        // Handle exit/quit at the REPL line level before parsing
         if (std.mem.eql(u8, trimmed, "quit")) return;
+        if (std.mem.eql(u8, trimmed, "exit")) return;
 
         debugPrint("> ", .{});
 
@@ -6906,6 +7065,11 @@ pub fn replLoop(vm: *Vm, env: *Environment) void {
                 continue;
             };
             vm.printValue(result);
+            // Check if result is a quit signal
+            if (result.type == .symbol) {
+                const symName = result.value.symbol.name[0..];
+                if (std.mem.eql(u8, symName, "exit") or std.mem.eql(u8, symName, "quit")) return;
+            }
             // NOTE: Do NOT destroy result here. Values created by evalDef/evalDefn
             // are stored in rootEnv and shared. Destroying them causes use-after-free.
             // Memory leaks in the REPL are acceptable for now.
@@ -9281,4 +9445,224 @@ test "stdlib.lisp — flatten" {
     // The result should have at least one element
     try std.testing.expectEqual(ObjType.number, result.value.cons.car.type);
     try std.testing.expectEqual(@as(i64, 1), result.value.cons.car.value.number);
+}
+
+test "bytecode — equal?" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // (equal? 1 1) → 1
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("equal?") },
+        Expr{ .number = 1 },
+        Expr{ .number = 1 },
+    }) }, &env, &vm);
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 1), result.value.number);
+
+    // (equal? 1 2) → nil (=0)
+    bc.clear();
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("equal?") },
+        Expr{ .number = 1 },
+        Expr{ .number = 2 },
+    }) }, &env, &vm);
+    const result2 = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 0), result2.value.number);
+}
+
+test "bytecode — even? / odd?" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // (even? 4) → 1
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("even?") },
+        Expr{ .number = 4 },
+    }) }, &env, &vm);
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 1), result.value.number);
+
+    // (odd? 3) → 1
+    bc.clear();
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("odd?") },
+        Expr{ .number = 3 },
+    }) }, &env, &vm);
+    const result2 = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 1), result2.value.number);
+
+    // (odd? 2) → nil (=0)
+    bc.clear();
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("odd?") },
+        Expr{ .number = 2 },
+    }) }, &env, &vm);
+    const result3 = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 0), result3.value.number);
+}
+
+test "bytecode — positive? / negative?" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // (positive? 5) → 1
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("positive?") },
+        Expr{ .number = 5 },
+    }) }, &env, &vm);
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 1), result.value.number);
+
+    // (negative? -3) → 1
+    bc.clear();
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("negative?") },
+        Expr{ .number = -3 },
+    }) }, &env, &vm);
+    const result2 = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 1), result2.value.number);
+}
+
+test "bytecode — type-of" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // (type-of 42) → symbol "number"
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("type-of") },
+        Expr{ .number = 42 },
+    }) }, &env, &vm);
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(ObjType.symbol, result.type);
+    try std.testing.expectEqualStrings("number", result.value.symbol.name[0..]);
+}
+
+test "bytecode — not" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // (not nil) → 1
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("not") },
+        Expr{ .nil = {} },
+    }) }, &env, &vm);
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 1), result.value.number);
+
+    // (not 1) → nil (=0)
+    bc.clear();
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("not") },
+        Expr{ .number = 1 },
+    }) }, &env, &vm);
+    const result2 = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 0), result2.value.number);
+}
+
+test "bytecode — bitwise ops" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // (bit-and 5 3) → 1
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("bit-and") },
+        Expr{ .number = 5 },
+        Expr{ .number = 3 },
+    }) }, &env, &vm);
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 1), result.value.number);
+
+    // (bit-or 5 3) → 7
+    bc.clear();
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("bit-or") },
+        Expr{ .number = 5 },
+        Expr{ .number = 3 },
+    }) }, &env, &vm);
+    const result2 = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 7), result2.value.number);
+
+    // (bit-not 0) → -1
+    bc.clear();
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("bit-not") },
+        Expr{ .number = 0 },
+    }) }, &env, &vm);
+    const result3 = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, -1), result3.value.number);
+
+    // (bit-shl 1 3) → 8
+    bc.clear();
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("bit-shl") },
+        Expr{ .number = 1 },
+        Expr{ .number = 3 },
+    }) }, &env, &vm);
+    const result4 = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 8), result4.value.number);
+
+    // (bit-shr 8 2) → 2
+    bc.clear();
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("bit-shr") },
+        Expr{ .number = 8 },
+        Expr{ .number = 2 },
+    }) }, &env, &vm);
+    const result5 = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 2), result5.value.number);
 }
