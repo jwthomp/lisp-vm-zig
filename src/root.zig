@@ -846,6 +846,8 @@ pub const BuiltinKind = enum {
     length,
     append, reverse, member, assoc, map, filter,
     println, load, import,
+    // Predicates
+    equal, even, odd, positive, negative, type_of,
 };
 
 pub const ConsCell = struct {
@@ -974,6 +976,13 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
         vm._registerBuiltin("println", .println);
         vm._registerBuiltin("load", .load);
         vm._registerBuiltin("import", .import);
+        // Predicate builtins
+        vm._registerBuiltin("equal?", .equal);
+        vm._registerBuiltin("even?", .even);
+        vm._registerBuiltin("odd?", .odd);
+        vm._registerBuiltin("positive?", .positive);
+        vm._registerBuiltin("negative?", .negative);
+        vm._registerBuiltin("type-of", .type_of);
 
         return vm;
     }
@@ -1435,6 +1444,102 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
         self.push(result);
     }
 
+    /// (equal? a b) — recursive structural equality
+    pub fn primEqual(self: *Vm) !void {
+        const b = self.pop() orelse return error.StackUnderflow;
+        const a = self.pop() orelse return error.StackUnderflow;
+        const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
+        result.* = LispObject.numberObj(if (self._equal(a, b)) 1 else 0);
+        self.push(result);
+    }
+
+    fn _equal(self: *Vm, a: *LispObject, b: *LispObject) bool {
+        if (a.type != b.type) return false;
+        return switch (a.type) {
+            .nil => true,
+            .number => a.value.number == b.value.number,
+            .symbol => std.mem.eql(u8, a.value.symbol.name, b.value.symbol.name),
+            .cons => self._equal(a.value.cons.car, b.value.cons.car) and
+                     self._equal(a.value.cons.cdr, b.value.cons.cdr),
+            .builtin => std.mem.eql(u8, a.value.builtin, b.value.builtin),
+            .closure => a == b, // pointer equality
+            else => false,
+        };
+    }
+
+    /// (even? n) — 1 if n is even
+    pub fn primEven(self: *Vm) !void {
+        const obj = self.pop() orelse return error.StackUnderflow;
+        const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
+        if (obj.type == .number) {
+            result.* = LispObject.numberObj(if (@rem(obj.value.number, 2) == 0) 1 else 0);
+        } else {
+            result.* = LispObject.numberObj(0);
+        }
+        self.push(result);
+    }
+
+    /// (odd? n) — 1 if n is odd
+    pub fn primOdd(self: *Vm) !void {
+        const obj = self.pop() orelse return error.StackUnderflow;
+        const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
+        if (obj.type == .number) {
+            result.* = LispObject.numberObj(if (@rem(obj.value.number, 2) != 0) 1 else 0);
+        } else {
+            result.* = LispObject.numberObj(0);
+        }
+        self.push(result);
+    }
+
+    /// (positive? n) — 1 if n > 0
+    pub fn primPositive(self: *Vm) !void {
+        const obj = self.pop() orelse return error.StackUnderflow;
+        const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
+        if (obj.type == .number) {
+            result.* = LispObject.numberObj(if (obj.value.number > 0) 1 else 0);
+        } else {
+            result.* = LispObject.numberObj(0);
+        }
+        self.push(result);
+    }
+
+    /// (negative? n) — 1 if n < 0
+    pub fn primNegative(self: *Vm) !void {
+        const obj = self.pop() orelse return error.StackUnderflow;
+        const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
+        if (obj.type == .number) {
+            result.* = LispObject.numberObj(if (obj.value.number < 0) 1 else 0);
+        } else {
+            result.* = LispObject.numberObj(0);
+        }
+        self.push(result);
+    }
+
+    /// (type-of x) — return symbol: nil, number, symbol, list, builtin, closure
+    pub fn primTypeOf(self: *Vm) !void {
+        const obj = self.pop() orelse return error.StackUnderflow;
+        const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
+        const name = switch (obj.type) {
+            .nil => "nil",
+            .number => "number",
+            .symbol => "symbol",
+            .cons => "list",
+            .builtin => "builtin",
+            .closure => "closure",
+            else => "unknown",
+        };
+        const sym = try self.allocator.create(Symbol);
+        sym.* = Symbol{ .name = name };
+        result.* = LispObject.symbolObj(sym);
+        self.push(result);
+    }
+
     /// length(lst) — count cons cells in a list
     pub fn primLength(self: *Vm) !void {
         const obj = self.pop() orelse return error.StackUnderflow;
@@ -1789,7 +1894,7 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                 }
             },
             .symbol => |sym| {
-                const name = sym.name[0 .. sym.name.len - 1];
+                const name = sym.name[0..];
                 std.mem.copyForwards(u8, buf[pos.*..], name); pos.* += name.len;
             },
             .cons => |cell| {
@@ -2350,6 +2455,13 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                 .println => { _ = self.primPrintln() catch unreachable; },
                 .load => { _ = self._load(items) catch unreachable; },
                 .import => { _ = self.primImport() catch unreachable; },
+                // Predicate builtins
+                .equal => { _ = self.primEqual() catch unreachable; },
+                .even => { _ = self.primEven() catch unreachable; },
+                .odd => { _ = self.primOdd() catch unreachable; },
+                .positive => { _ = self.primPositive() catch unreachable; },
+                .negative => { _ = self.primNegative() catch unreachable; },
+                .type_of => { _ = self.primTypeOf() catch unreachable; },
             }
             return self.pop() orelse {
                 const obj = try self.allocator.create(LispObject);
@@ -2433,6 +2545,13 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                             .println => { _ = self.primPrintln() catch unreachable; },
                             .load => { _ = self._load(items) catch unreachable; },
                             .import => { _ = self.primImport() catch unreachable; },
+                            // Predicate builtins
+                            .equal => { _ = self.primEqual() catch unreachable; },
+                            .even => { _ = self.primEven() catch unreachable; },
+                            .odd => { _ = self.primOdd() catch unreachable; },
+                            .positive => { _ = self.primPositive() catch unreachable; },
+                            .negative => { _ = self.primNegative() catch unreachable; },
+                            .type_of => { _ = self.primTypeOf() catch unreachable; },
                         }
                         return self.pop() orelse {
                             const obj = try self.allocator.create(LispObject);
@@ -3043,6 +3162,13 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                                 .println => try self.primPrintln(),
                                 .load => try self._load(items),
                                 .import => try self.primImport(),
+                                // Predicate builtins
+                                .equal => try self.primEqual(),
+                                .even => try self.primEven(),
+                                .odd => try self.primOdd(),
+                                .positive => try self.primPositive(),
+                                .negative => try self.primNegative(),
+                                .type_of => try self.primTypeOf(),
                             }
                             return self.pop() orelse {
                                 const obj = try self.allocator.create(LispObject);
