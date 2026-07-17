@@ -1973,11 +1973,10 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
             return;
         }
 
-        const fileNameObj = try self.eval(items[1], self.rootEnv);
-        defer self.allocator.destroy(fileNameObj);
-
+        // Don't eval the filename - just use the symbol directly.
+        // eval() would look up the symbol in the env, which fails for arbitrary string-valued symbols.
         var filename: []const u8 = "";
-        switch (fileNameObj.value) {
+        switch (items[1]) {
             .symbol => |sym| {
                 filename = sym.name[0..];
                 while (filename.len > 0 and filename[filename.len - 1] == 0) {
@@ -2049,10 +2048,15 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
 
         while (true) {
             const expr = parser.parseSExpr(0) catch break;
-            const evaluated = try self.eval(expr, self.rootEnv);
-            // Destroy old result before replacing
-            if (result_obj) |old| self.allocator.destroy(old);
-            result_obj = evaluated;
+            switch (expr) {
+                .nil => break,
+                else => |e| {
+                    const evaluated = try self.eval(e, self.rootEnv);
+                    // Destroy old result before replacing
+                    if (result_obj) |old| self.allocator.destroy(old);
+                    result_obj = evaluated;
+                },
+            }
         }
 
         if (result_obj == null) {
@@ -5365,16 +5369,22 @@ test "load builtin — registered in dispatch table" {
     _ = try symtab.getOrPut("defn");
     _ = try symtab.getOrPut("let");
 
-    // (load "some-file.lisp") — returns nil in test harness
+    // (load "test_load.lisp") — loads a simple file with one defn
     const callItems: []Expr = try alloc.dupe(Expr, &[2]Expr{
         Expr{ .symbol = try symtab.getOrPut("load") },
-        Expr{ .symbol = try symtab.getOrPut("stdlib.lisp") },
+        Expr{ .symbol = try symtab.getOrPut("test_load.lisp") },
     });
     defer alloc.free(callItems);
 
     const result = try vm.eval(Expr{ .list = callItems }, &env);
     defer alloc.destroy(result);
-    try std.testing.expectEqual(ObjType.nil, result.type);
+    // test-fn closure should be bound and load returns the result (closure)
+    try std.testing.expectEqual(ObjType.closure, result.type);
+    // Verify test-fn was bound in rootEnv
+    const testFnSym = try symtab.getOrPut("test-fn");
+    const testFnVal = vm.rootEnv.lookup(testFnSym.name);
+    try std.testing.expect(testFnVal != null);
+    try std.testing.expectEqual(ObjType.closure, testFnVal.?.type);
 }
 
 test "macro — when/unless pattern" {
@@ -6190,15 +6200,41 @@ test "defpackage + import — package registration enables symbol resolution" {
 
 
 test "load — reads a file and evaluates expressions" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = Vm.init(alloc, &env);
+    defer vm.deinit();
 
-
-
-// ============================================================
-
-// ============================================================
-// T9: Common Lisp examples — inline function tests
-// ============================================================
-
+    // Load test_load.lisp which defines test-fn (uses only builtins: +, defn)
+    const loadExpr: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("load") },
+        Expr{ .symbol = try symtab.getOrPut("test_load.lisp") },
+    });
+    defer alloc.free(loadExpr);
+    
+    // Call load - this parses and evaluates the file, binding test-fn to rootEnv
+    const result = try vm.eval(Expr{ .list = loadExpr }, &env);
+    try std.testing.expectEqual(ObjType.closure, result.type);
+    
+    // Verify test-fn was bound in rootEnv by the loaded file
+    const testFnSym = try symtab.getOrPut("test-fn");
+    const testFnVal = vm.rootEnv.lookup(testFnSym.name);
+    try std.testing.expect(testFnVal != null);
+    try std.testing.expectEqual(ObjType.closure, testFnVal.?.type);
+    
+    // Verify we can call test-fn: (test-fn 5) => 6
+    const call: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("test-fn") },
+        Expr{ .number = 5 },
+    });
+    defer alloc.free(call);
+    const callResult = try vm.eval(Expr{ .list = call }, &env);
+    try std.testing.expectEqual(ObjType.number, callResult.type);
+    try std.testing.expectEqual(@as(i64, 6), callResult.value.number);
 }
 
 

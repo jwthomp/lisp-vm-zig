@@ -146,3 +146,24 @@
   (if (= n 0)
       nil
       (append (range (- n 1)) (list (- n 1)))))
+
+;; (sort lst cmp?) — sort list by cmp?, default < comparison
+;; Uses insertion sort
+(defn sort
+  (lst cmp?)
+  (if (null? lst)
+      nil
+      (insert (car lst) (sort (cdr lst) cmp?) cmp?)))
+
+;; (insert item lst cmp?) — insert item into sorted list
+(defn insert
+  (item lst cmp?)
+  (if (null? lst)
+      (list item)
+      (if (null? cmp?)
+          (if (< item (car lst))
+              (cons item lst)
+              (cons (car lst) (insert item (cdr lst) nil)))
+          (if (= (call cmp? item (car lst)) 1)
+              (cons item lst)
+              (cons (car lst) (insert item (cdr lst) cmp?))))))
