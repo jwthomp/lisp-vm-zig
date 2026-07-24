@@ -57,11 +57,11 @@ pub const Bytecode = struct {
     closure_bodies: std.ArrayList(std.ArrayList(u8)),
     allocator: Allocator,
 
-    pub fn init(allocator: Allocator) Bytecode {
+    pub fn init(allocator: Allocator) !Bytecode {
         return Bytecode{
-            .ops = std.ArrayList(u8).initCapacity(allocator, 64) catch unreachable,
-            .constants = std.ArrayList(*LispObject).initCapacity(allocator, 16) catch unreachable,
-            .closure_bodies = std.ArrayList(std.ArrayList(u8)).initCapacity(allocator, 4) catch unreachable,
+            .ops = try std.ArrayList(u8).initCapacity(allocator, 64),
+            .constants = try std.ArrayList(*LispObject).initCapacity(allocator, 16),
+            .closure_bodies = try std.ArrayList(std.ArrayList(u8)).initCapacity(allocator, 4),
             .allocator = allocator,
         };
     }
@@ -88,58 +88,58 @@ pub const Bytecode = struct {
     }
 
     /// Emit a single opcode byte
-    fn emitOp(self: *Bytecode, op: Opcode) void {
-        self.ops.append(self.allocator, @intFromEnum(op)) catch unreachable;
+    fn emitOp(self: *Bytecode, op: Opcode) !void {
+        try self.ops.append(self.allocator, @intFromEnum(op));
     }
 
     /// Emit an operand (u32, little-endian)
-    fn emitU32(self: *Bytecode, val: u32) void {
+    fn emitU32(self: *Bytecode, val: u32) !void {
         var v = val;
         var i: usize = 0;
         while (i < 4) : (i += 1) {
-            self.ops.append(self.allocator, @as(u8, @intCast(v & 0xFF))) catch unreachable;
+            try self.ops.append(self.allocator, @as(u8, @intCast(v & 0xFF)));
             v >>= 8;
         }
     }
 
     /// Emit an operand (i64, little-endian)
-    fn emitI64(self: *Bytecode, val: i64) void {
+    fn emitI64(self: *Bytecode, val: i64) !void {
         var v = val;
         var i: usize = 0;
         while (i < 8) : (i += 1) {
-            self.ops.append(self.allocator, @as(u8, @intCast(v & 0xFF))) catch unreachable;
+            try self.ops.append(self.allocator, @as(u8, @intCast(v & 0xFF)));
             v >>= 8;
         }
     }
 
     /// Emit a nil opcode
-    pub fn emitNil(self: *Bytecode) void {
-        self.emitOp(.nil);
+    pub fn emitNil(self: *Bytecode) !void {
+        try self.emitOp(.nil);
     }
 
     /// Emit a number opcode
-pub fn emitNumber(self: *Bytecode, n: i64) void {
-    self.emitOp(.number);
-    self.emitI64(n);
+pub fn emitNumber(self: *Bytecode, n: i64) !void {
+    try self.emitOp(.number);
+try self.emitI64(n);
 }
 
 /// Emit a symbol lookup opcode (index into constants)
-fn emitSymbol(self: *Bytecode, index: u32) void {
-    self.emitOp(.symbol);
-    self.emitU32(index);
+fn emitSymbol(self: *Bytecode, index: u32) !void {
+    try self.emitOp(.symbol);
+try self.emitU32(index);
 }
 
 /// Emit a constant value opcode (index into constants)
-fn emitConstVal(self: *Bytecode, index: u32) void {
-    self.emitOp(.const_val);
-    self.emitU32(index);
+fn emitConstVal(self: *Bytecode, index: u32) !void {
+    try self.emitOp(.const_val);
+try self.emitU32(index);
 }
 
 /// Add a symbol to constants and return its index
-pub fn emitConstRef(self: *Bytecode, sym: *Symbol) u32 {
+pub fn emitConstRef(self: *Bytecode, sym: *Symbol) !u32 {
         const idx = @as(u32, @intCast(self.constants.items.len));
         debugPrint("emitConstRef: creating symbol object for '{s}'\n", .{sym.name[0..]});
-        const obj = self.allocator.create(LispObject) catch unreachable;
+        const obj = try self.allocator.create(LispObject);
         obj.* = LispObject.symbolObj(sym);
         debugPrint("emitConstRef: appending to constants, len before={d}, len after={d}\n", .{ idx, idx + 1 });
         self.constants.appendAssumeCapacity(obj);
@@ -148,18 +148,18 @@ pub fn emitConstRef(self: *Bytecode, sym: *Symbol) u32 {
     }
 
     /// Emit a jump opcode (placeholder, filled later)
-    pub fn emitJump(self: *Bytecode) u32 {
-        self.emitOp(.jump);
+    pub fn emitJump(self: *Bytecode) !u32 {
+        try self.emitOp(.jump);
         const offset = @as(u32, @intCast(self.ops.items.len));
-        self.emitU32(0); // placeholder
+        try self.emitU32(0); // placeholder
         return offset;
     }
 
     /// Emit a conditional jump opcode
-    pub fn emitJumpIfFalse(self: *Bytecode) u32 {
-        self.emitOp(.jump_if_false);
+    pub fn emitJumpIfFalse(self: *Bytecode) !u32 {
+        try self.emitOp(.jump_if_false);
         const offset = @as(u32, @intCast(self.ops.items.len));
-        self.emitU32(0); // placeholder
+        try self.emitU32(0); // placeholder
         return offset;
     }
 
@@ -173,62 +173,62 @@ pub fn emitConstRef(self: *Bytecode, sym: *Symbol) u32 {
     }
 
     /// Emit a def opcode
-    pub fn emitDef(self: *Bytecode, index: u32) void {
-        self.emitOp(.def);
-        self.emitU32(index);
+    pub fn emitDef(self: *Bytecode, index: u32) !void {
+        try self.emitOp(.def);
+        try self.emitU32(index);
     }
 
     /// Emit a defn opcode
-    pub fn emitDefn(self: *Bytecode, index: u32) void {
-        self.emitOp(.defn);
-        self.emitU32(index);
+    pub fn emitDefn(self: *Bytecode, index: u32) !void {
+        try self.emitOp(.defn);
+        try self.emitU32(index);
     }
 
     /// Emit a let opcode (startIdx, count)
-    pub fn emitLet(self: *Bytecode, startIdx: u32, count: u32) void {
-        self.emitOp(.let);
-        self.emitU32(startIdx);
-        self.emitU32(count);
+    pub fn emitLet(self: *Bytecode, startIdx: u32, count: u32) !void {
+        try self.emitOp(.let);
+        try self.emitU32(startIdx);
+        try self.emitU32(count);
     }
 
     /// Emit an if opcode
-    pub fn emitIf(self: *Bytecode, elseOffset: u32) void {
-        self.emitOp(.iff);
-        self.emitU32(elseOffset);
+    pub fn emitIf(self: *Bytecode, elseOffset: u32) !void {
+        try self.emitOp(.iff);
+        try self.emitU32(elseOffset);
     }
 
     /// Emit a quote opcode
-    pub fn emitQuote(self: *Bytecode, index: u32) void {
-        self.emitOp(.quote);
-        self.emitU32(index);
+    pub fn emitQuote(self: *Bytecode, index: u32) !void {
+        try self.emitOp(.quote);
+        try self.emitU32(index);
     }
 
     /// Emit a do opcode
-    pub fn emitDo(self: *Bytecode, count: u32) void {
-        self.emitOp(.do);
-        self.emitU32(count);
+    pub fn emitDo(self: *Bytecode, count: u32) !void {
+        try self.emitOp(.do);
+        try self.emitU32(count);
     }
 
     /// Emit a call opcode
-    pub fn emitCall(self: *Bytecode, argCount: u8) void {
-        self.emitOp(.call);
+    pub fn emitCall(self: *Bytecode, argCount: u8) !void {
+        try self.emitOp(.call);
         self.ops.appendAssumeCapacity(argCount);
     }
 
     /// Emit a tailcall opcode
-    pub fn emitTailcall(self: *Bytecode, argCount: u8) void {
-        self.emitOp(.tailcall);
+    pub fn emitTailcall(self: *Bytecode, argCount: u8) !void {
+        try self.emitOp(.tailcall);
         self.ops.appendAssumeCapacity(argCount);
     }
 
     /// Emit a pop opcode
-    pub fn emitPop(self: *Bytecode) void {
-        self.emitOp(.pop);
+    pub fn emitPop(self: *Bytecode) !void {
+        try self.emitOp(.pop);
     }
 
     /// Emit a dup opcode
-    pub fn emitDup(self: *Bytecode) void {
-        self.emitOp(.dup);
+    pub fn emitDup(self: *Bytecode) !void {
+        try self.emitOp(.dup);
     }
 
     /// Add a constant and return its index
@@ -248,10 +248,10 @@ pub fn emitConstRef(self: *Bytecode, sym: *Symbol) u32 {
     pub fn compileExpr(self: *Bytecode, expr: Expr, env: *Environment, vm: *Vm) anyerror!void {
         switch (expr) {
             .nil => {
-                self.emitNil();
+                try self.emitNil();
             },
             .number => |n| {
-                self.emitNumber(n);
+                try self.emitNumber(n);
             },
             .symbol => |sym| {
                 // Check if it's a special form
@@ -259,15 +259,15 @@ pub fn emitConstRef(self: *Bytecode, sym: *Symbol) u32 {
                 while (clean.len > 0 and clean[clean.len - 1] == 0) clean = clean[0 .. clean.len - 1];
 
                 if (std.mem.eql(u8, clean, "nil")) {
-                    self.emitNil();
+                    try self.emitNil();
                 } else {
                     // Regular symbol lookup — add to constants
-                    self.emitSymbol(vm._addConstantSymbol(sym));
+                    try self.emitSymbol(try vm._addConstantSymbol(sym));
                 }
             },
             .list => |items| {
                 if (items.len == 0) {
-                    self.emitNil();
+                    try self.emitNil();
                     return;
                 }
 
@@ -306,42 +306,42 @@ pub fn emitConstRef(self: *Bytecode, sym: *Symbol) u32 {
     fn compileIf(self: *Bytecode, items: []Expr, env: *Environment, vm: *Vm) !void {
         // (if test then else?)
         try self.compileExpr(items[1], env, vm); // test
-        const elseOffset = self.emitJumpIfFalse();
+        const elseOffset = try self.emitJumpIfFalse();
         try self.compileExpr(items[2], env, vm); // then
-        const endOffset = self.emitJump();
+        const endOffset = try self.emitJump();
         self.patchJump(elseOffset, self.ops.items.len);
         if (items.len > 3) {
             try self.compileExpr(items[3], env, vm); // else
         } else {
-            self.emitNil(); // implicit nil
+            try self.emitNil(); // implicit nil
         }
         self.patchJump(endOffset, self.ops.items.len);
     }
 
     fn compileQuote(self: *Bytecode, items: []Expr, vm: *Vm) !void {
         // (quote x) — push constant
-        const idx = vm._addConstantExpr(items[1]);
-        self.emitQuote(idx);
+        const idx = try vm._addConstantExpr(items[1]);
+        try self.emitQuote(idx);
     }
 
     fn compileDef(self: *Bytecode, items: []Expr, env: *Environment, vm: *Vm) !void {
         // (def name value)
         if (items[1] == .symbol) {
-            const nameIdx = self.emitConstRef(items[1].symbol);
+            const nameIdx = try self.emitConstRef(items[1].symbol);
             try self.compileExpr(items[2], env, vm); // value
-            self.emitDef(nameIdx);
+            try self.emitDef(nameIdx);
         }
     }
 
     fn compileDefn(self: *Bytecode, items: []Expr, env: *Environment, vm: *Vm) !void {
         debugPrint("compileDefn: entering, ops.len={d}\n", .{self.ops.items.len});
         // (defn name (params) body...)
-        const nameIdx = vm._addConstantExpr(items[1]);
+        const nameIdx = try vm._addConstantExpr(items[1]);
         debugPrint("compileDefn: nameIdx={d}, ops.len={d}\n", .{nameIdx, self.ops.items.len});
         const paramsExpr = items[2];
         const bodyExprs = items[3..];
         try self.compileFn(paramsExpr, bodyExprs, env, vm);
-        self.emitDefn(nameIdx);
+        try self.emitDefn(nameIdx);
     }
 
     fn compileLet(self: *Bytecode, items: []Expr, env: *Environment, vm: *Vm) !void {
@@ -359,7 +359,7 @@ pub fn emitConstRef(self: *Bytecode, sym: *Symbol) u32 {
             var i: usize = 0;
             while (i < listExpr.len) {
                 if (listExpr[i] == .symbol) {
-                    _ = self.emitConstRef(listExpr[i].symbol);
+                    _ = try self.emitConstRef(listExpr[i].symbol);
                 }
                 i += 1;
             }
@@ -377,7 +377,7 @@ pub fn emitConstRef(self: *Bytecode, sym: *Symbol) u32 {
 
         // Emit let opcode with starting constant index and count
         const bindingCount: u32 = if (bindingsExpr == .list) @intCast(bindingsExpr.list.len / 2) else 0;
-        self.emitLet(startIdx, bindingCount);
+        try self.emitLet(startIdx, bindingCount);
 
         // Compile body
         var i: usize = 0;
@@ -390,7 +390,7 @@ pub fn emitConstRef(self: *Bytecode, sym: *Symbol) u32 {
     fn compileDo(self: *Bytecode, items: []Expr, env: *Environment, vm: *Vm) !void {
         // (do expr ...)
         const count = if (items.len > 1) @as(u32, @intCast(items.len - 1)) else 0;
-        self.emitDo(count);
+        try self.emitDo(count);
         var i: usize = 1;
         while (i < items.len) {
             try self.compileExpr(items[i], env, vm);
@@ -495,9 +495,9 @@ pub fn emitConstRef(self: *Bytecode, sym: *Symbol) u32 {
                 debugPrint("compileCall: checking builtin '{s}'\n", .{clean});
                 if (vm.dispatch_table.get(clean)) |_| {
                     // It's a builtin - add to bytecode constants
-                    const nameIdx = self.emitConstRef(sym);
+                    const nameIdx = try self.emitConstRef(sym);
                     debugPrint("emitConstRef: added symbol '{s}' at idx {d}\n", .{ sym.name[0..], nameIdx });
-                    self.emitConstVal(nameIdx);
+                    try self.emitConstVal(nameIdx);
                 } else {
                     // Not a builtin — regular symbol lookup
                     debugPrint("compileCall: '{s}' not found in dispatch_table\n", .{clean});
@@ -511,7 +511,7 @@ pub fn emitConstRef(self: *Bytecode, sym: *Symbol) u32 {
 
         // Emit call with arg count
         const argCount = if (items.len > 1) @as(u8, @intCast(items.len - 1)) else 0;
-        self.emitCall(argCount);
+        try self.emitCall(argCount);
     }
 };
 
@@ -528,80 +528,80 @@ pub const Vm = struct {
     gcHeap: std.ArrayList(*LispObject),
     bytecode_constants: std.ArrayList(*LispObject),
 
-pub fn init(allocator: Allocator, env: *Environment) Vm {
-        const dt = allocator.create(std.StringHashMap(BuiltinKind)) catch unreachable;
+pub fn init(allocator: Allocator, env: *Environment) !Vm {
+        const dt = try allocator.create(std.StringHashMap(BuiltinKind));
         dt.* = std.StringHashMap(BuiltinKind).init(allocator);
         errdefer allocator.destroy(dt);
 
         var vm = Vm{
-            .stack = std.ArrayList(*LispObject).initCapacity(allocator, 256) catch unreachable,
+            .stack = try std.ArrayList(*LispObject).initCapacity(allocator, 256),
             .allocator = allocator,
             .rootEnv = env,
             .macroArgs = std.StringHashMap(Expr).init(allocator),
             .dispatch_table = dt,
             .packageTable = std.StringHashMap([]const u8).init(allocator),
-            .gcHeap = std.ArrayList(*LispObject).initCapacity(allocator, 64) catch unreachable,
-            .bytecode_constants = std.ArrayList(*LispObject).initCapacity(allocator, 64) catch unreachable,
+            .gcHeap = try std.ArrayList(*LispObject).initCapacity(allocator, 64),
+            .bytecode_constants = try std.ArrayList(*LispObject).initCapacity(allocator, 64),
         };
 
         // Register all builtins
-        vm._registerBuiltin("+", .add);
-        vm._registerBuiltin("-", .sub);
-        vm._registerBuiltin("*", .mul);
-        vm._registerBuiltin("/", .div);
-        vm._registerBuiltin("=", .eq);
-        vm._registerBuiltin("<", .lt);
-        vm._registerBuiltin(">", .gt);
-        vm._registerBuiltin("<=", .le);
-        vm._registerBuiltin(">=", .ge);
-        vm._registerBuiltin("rem", .rem);
-        vm._registerBuiltin("bit-and", .bit_and);
-        vm._registerBuiltin("bit-or", .bit_or);
-        vm._registerBuiltin("bit-not", .bit_not);
-        vm._registerBuiltin("bit-shl", .bit_shl);
-        vm._registerBuiltin("bit-shr", .bit_shr);
-        vm._registerBuiltin("cons", .cons);
-        vm._registerBuiltin("car", .car);
-        vm._registerBuiltin("cdr", .cdr);
-        vm._registerBuiltin("print", .print);
-        vm._registerBuiltin("null?", .null);
-        vm._registerBuiltin("not", .not);
-        vm._registerBuiltin("symbol?", .symbol);
-        vm._registerBuiltin("number?", .number);
-        vm._registerBuiltin("list?", .list);
-        vm._registerBuiltin("length", .length);
-        vm._registerBuiltin("append", .append);
-        vm._registerBuiltin("reverse", .reverse);
-        vm._registerBuiltin("member", .member);
-        vm._registerBuiltin("assoc", .assoc);
-        vm._registerBuiltin("map", .map);
-        vm._registerBuiltin("filter", .filter);
-        vm._registerBuiltin("println", .println);
-        vm._registerBuiltin("load", .load);
-        vm._registerBuiltin("import", .import);
+        try vm._registerBuiltin("+", .add);
+        try vm._registerBuiltin("-", .sub);
+        try vm._registerBuiltin("*", .mul);
+        try vm._registerBuiltin("/", .div);
+        try vm._registerBuiltin("=", .eq);
+        try vm._registerBuiltin("<", .lt);
+        try vm._registerBuiltin(">", .gt);
+        try vm._registerBuiltin("<=", .le);
+        try vm._registerBuiltin(">=", .ge);
+        try vm._registerBuiltin("rem", .rem);
+        try vm._registerBuiltin("bit-and", .bit_and);
+        try vm._registerBuiltin("bit-or", .bit_or);
+        try vm._registerBuiltin("bit-not", .bit_not);
+        try vm._registerBuiltin("bit-shl", .bit_shl);
+        try vm._registerBuiltin("bit-shr", .bit_shr);
+        try vm._registerBuiltin("cons", .cons);
+        try vm._registerBuiltin("car", .car);
+        try vm._registerBuiltin("cdr", .cdr);
+        try vm._registerBuiltin("print", .print);
+        try vm._registerBuiltin("null?", .null);
+        try vm._registerBuiltin("not", .not);
+        try vm._registerBuiltin("symbol?", .symbol);
+        try vm._registerBuiltin("number?", .number);
+        try vm._registerBuiltin("list?", .list);
+        try vm._registerBuiltin("length", .length);
+        try vm._registerBuiltin("append", .append);
+        try vm._registerBuiltin("reverse", .reverse);
+        try vm._registerBuiltin("member", .member);
+        try vm._registerBuiltin("assoc", .assoc);
+        try vm._registerBuiltin("map", .map);
+        try vm._registerBuiltin("filter", .filter);
+        try vm._registerBuiltin("println", .println);
+        try vm._registerBuiltin("load", .load);
+        try vm._registerBuiltin("import", .import);
         // Predicate builtins
-        vm._registerBuiltin("equal?", .equal);
-        vm._registerBuiltin("even?", .even);
-        vm._registerBuiltin("odd?", .odd);
-        vm._registerBuiltin("positive?", .positive);
-        vm._registerBuiltin("negative?", .negative);
-        vm._registerBuiltin("type-of", .type_of);
+        try vm._registerBuiltin("equal?", .equal);
+        try vm._registerBuiltin("even?", .even);
+        try vm._registerBuiltin("odd?", .odd);
+        try vm._registerBuiltin("positive?", .positive);
+        try vm._registerBuiltin("negative?", .negative);
+        try vm._registerBuiltin("type-of", .type_of);
 
         return vm;
     }
 
-    fn _registerBuiltin(self: *Vm, name: []const u8, kind: BuiltinKind) void {
-        const key = self.allocator.dupe(u8, name) catch unreachable;
-        const e = self.dispatch_table.getOrPut(key) catch unreachable;
+    fn _registerBuiltin(self: *Vm, name: []const u8, kind: BuiltinKind) !void {
+        const key = try self.allocator.dupe(u8, name);
+        const e = self.dispatch_table.getOrPut(key) catch return error.OutOfMemory;
         e.value_ptr.* = kind;
 
         // Also register as a "builtin" LispObject in rootEnv so it can be
         // referenced as a value (e.g., passed to `call` or stored in a closure).
-        const obj = self.allocator.create(LispObject) catch unreachable;
+        const obj = try self.allocator.create(LispObject);
         self.gcRegister(obj);
         obj.type = .builtin;
         obj.value = .{ .builtin = key };
-        _ = self.rootEnv.bind(key, obj) catch unreachable;
+        try self.rootEnv.bind(key, obj);
     }
 
     pub fn deinit(self: *Vm) void {
@@ -653,7 +653,7 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
         self._gcMarkEnv(self.rootEnv);
 
         // Step 3: Sweep — free all unmarked objects
-        var free_list = std.ArrayList(*LispObject).initCapacity(self.allocator, 8) catch unreachable;
+        var free_list = try std.ArrayList(*LispObject).initCapacity(self.allocator, 8);
         defer free_list.deinit();
         i = 0;
         while (i < self.gcHeap.items.len) : (i += 1) {
@@ -732,9 +732,9 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
     }
 
     /// Add a Symbol to the bytecode constant pool and return its index
-    pub fn _addConstantSymbol(self: *Vm, sym: *Symbol) u32 {
+    pub fn _addConstantSymbol(self: *Vm, sym: *Symbol) !u32 {
         const idx = @as(u32, @intCast(self.bytecode_constants.items.len));
-        const obj = self.allocator.create(LispObject) catch unreachable;
+        const obj = try self.allocator.create(LispObject);
         obj.* = LispObject.symbolObj(sym);
         self.gcRegister(obj);
         self.bytecode_constants.appendAssumeCapacity(obj);
@@ -742,8 +742,8 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
     }
 
     /// Add an Expr converted to a LispObject constant and return its index
-    pub fn _addConstantExpr(self: *Vm, expr: Expr) u32 {
-        const obj = self.allocator.create(LispObject) catch unreachable;
+    pub fn _addConstantExpr(self: *Vm, expr: Expr) !u32 {
+        const obj = try self.allocator.create(LispObject);
         switch (expr) {
             .nil => {
                 obj.* = LispObject.nilObj();
@@ -765,31 +765,31 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                     var i: usize = items.len;
                     while (i > 0) {
                         i -= 1;
-                        const cell_obj = self.allocator.create(LispObject) catch unreachable;
+                        const cell_obj = try self.allocator.create(LispObject);
                         self.gcRegister(cell_obj);
-                        const cell = self.allocator.create(ConsCell) catch unreachable;
+                        const cell = try self.allocator.create(ConsCell);
 
                         const car_val: *LispObject = switch (items[i]) {
                             .nil => blk: {
-                                const o = self.allocator.create(LispObject) catch unreachable;
+                                const o = try self.allocator.create(LispObject);
                                 self.gcRegister(o);
                                 o.* = LispObject.nilObj();
                                 break :blk o;
                             },
                             .number => |n| blk: {
-                                const o = self.allocator.create(LispObject) catch unreachable;
+                                const o = try self.allocator.create(LispObject);
                                 self.gcRegister(o);
                                 o.* = LispObject.numberObj(n);
                                 break :blk o;
                             },
                             .symbol => blk: {
-                                const o = self.allocator.create(LispObject) catch unreachable;
+                                const o = try self.allocator.create(LispObject);
                                 self.gcRegister(o);
                                 o.* = LispObject.nilObj();
                                 break :blk o;
                             },
                             .list => blk: {
-                                const o = self.allocator.create(LispObject) catch unreachable;
+                                const o = try self.allocator.create(LispObject);
                                 self.gcRegister(o);
                                 o.* = LispObject.nilObj();
                                 break :blk o;
@@ -1293,7 +1293,7 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
         nil_obj.* = LispObject.nilObj();
 
         // Collect elements
-        var elements = std.ArrayList(*LispObject).initCapacity(self.allocator, 16) catch unreachable;
+        var elements = try std.ArrayList(*LispObject).initCapacity(self.allocator, 16);
         defer elements.deinit(self.allocator);
         var curr: *LispObject = obj;
         while (curr.type == .cons) {
@@ -1684,9 +1684,9 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
 
         // Tokenize
         var lexer = Lexer.init(contents);
-        var texts_list = std.ArrayList([]const u8).initCapacity(self.allocator, 16) catch unreachable;
+        var texts_list = try std.ArrayList([]const u8).initCapacity(self.allocator, 16);
         errdefer texts_list.deinit(self.allocator);
-        var tokens = std.ArrayList(Token).initCapacity(self.allocator, 16) catch unreachable;
+        var tokens = try std.ArrayList(Token).initCapacity(self.allocator, 16);
         errdefer tokens.deinit(self.allocator);
 
         while (true) {
@@ -1695,7 +1695,7 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                 .eof => break,
                 else => {
                     try tokens.append(self.allocator, tok);
-                    texts_list.append(self.allocator, lexer.current_text) catch unreachable;
+                    try texts_list.append(self.allocator, lexer.current_text);
                 },
             }
         }
@@ -1775,9 +1775,9 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
 
         // Tokenize
         var lexer = Lexer.init(file_buf);
-        var texts_list = std.ArrayList([]const u8).initCapacity(self.allocator, 16) catch unreachable;
+        var texts_list = try std.ArrayList([]const u8).initCapacity(self.allocator, 16);
         errdefer texts_list.deinit(self.allocator);
-        var tokens = std.ArrayList(Token).initCapacity(self.allocator, 16) catch unreachable;
+        var tokens = try std.ArrayList(Token).initCapacity(self.allocator, 16);
         errdefer tokens.deinit(self.allocator);
 
         while (true) {
@@ -1786,7 +1786,7 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                 .eof => break,
                 else => {
                     try tokens.append(self.allocator, tok);
-                    texts_list.append(self.allocator, lexer.current_text) catch unreachable;
+                    try texts_list.append(self.allocator, lexer.current_text);
                 },
             }
         }
@@ -2093,47 +2093,47 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
             }
             // Execute primitive dispatch — catch all errors from anyerror-returning primitives
             switch (kind) {
-                .add => { _ = self.primAdd() catch unreachable; },
-                .sub => { _ = self.primSub() catch unreachable; },
-                .mul => { _ = self.primMul() catch unreachable; },
-                .div => { _ = self.primDiv() catch unreachable; },
-                .rem => { _ = self.primRem() catch unreachable; },
-                .bit_and => { _ = self.primBitAnd() catch unreachable; },
-                .bit_or => { _ = self.primBitOr() catch unreachable; },
-                .bit_not => { _ = self.primBitNot() catch unreachable; },
-                .bit_shl => { _ = self.primBitShl() catch unreachable; },
-                .bit_shr => { _ = self.primBitShr() catch unreachable; },
-                .eq => { _ = self.primEq() catch unreachable; },
-                .lt => { _ = self.primLt() catch unreachable; },
-                .gt => { _ = self.primGt() catch unreachable; },
-                .le => { _ = self.primLe() catch unreachable; },
-                .ge => { _ = self.primGe() catch unreachable; },
-                .cons => { _ = self.primCons() catch unreachable; },
-                .car => { _ = self.primCar() catch unreachable; },
-                .cdr => { _ = self.primCdr() catch unreachable; },
-                .print => { _ = self.primPrint() catch unreachable; },
-                .null => { _ = self.primNullQ() catch unreachable; },
-                .not => { _ = self.primNot() catch unreachable; },
-                .symbol => { _ = self.primSymbolQ() catch unreachable; },
-                .number => { _ = self.primNumberQ() catch unreachable; },
-                .list => { _ = self.primListQ() catch unreachable; },
-                .length => { _ = self.primLength() catch unreachable; },
-                .append => { _ = self.primAppend() catch unreachable; },
-                .reverse => { _ = self.primReverse() catch unreachable; },
-                .member => { _ = self.primMember() catch unreachable; },
-                .assoc => { _ = self.primAssoc() catch unreachable; },
-                .map => { _ = self.primMap() catch unreachable; },
-                .filter => { _ = self.primFilter() catch unreachable; },
-                .println => { _ = self.primPrintln() catch unreachable; },
-                .load => { _ = self._load(items) catch unreachable; },
-                .import => { _ = self.primImport() catch unreachable; },
+                .add => { _ = self.primAdd() catch {}; },
+                .sub => { _ = self.primSub() catch {}; },
+                .mul => { _ = self.primMul() catch {}; },
+                .div => { _ = self.primDiv() catch {}; },
+                .rem => { _ = self.primRem() catch {}; },
+                .bit_and => { _ = self.primBitAnd() catch {}; },
+                .bit_or => { _ = self.primBitOr() catch {}; },
+                .bit_not => { _ = self.primBitNot() catch {}; },
+                .bit_shl => { _ = self.primBitShl() catch {}; },
+                .bit_shr => { _ = self.primBitShr() catch {}; },
+                .eq => { _ = self.primEq() catch {}; },
+                .lt => { _ = self.primLt() catch {}; },
+                .gt => { _ = self.primGt() catch {}; },
+                .le => { _ = self.primLe() catch {}; },
+                .ge => { _ = self.primGe() catch {}; },
+                .cons => { _ = self.primCons() catch {}; },
+                .car => { _ = self.primCar() catch {}; },
+                .cdr => { _ = self.primCdr() catch {}; },
+                .print => { _ = self.primPrint() catch {}; },
+                .null => { _ = self.primNullQ() catch {}; },
+                .not => { _ = self.primNot() catch {}; },
+                .symbol => { _ = self.primSymbolQ() catch {}; },
+                .number => { _ = self.primNumberQ() catch {}; },
+                .list => { _ = self.primListQ() catch {}; },
+                .length => { _ = self.primLength() catch {}; },
+                .append => { _ = self.primAppend() catch {}; },
+                .reverse => { _ = self.primReverse() catch {}; },
+                .member => { _ = self.primMember() catch {}; },
+                .assoc => { _ = self.primAssoc() catch {}; },
+                .map => { _ = self.primMap() catch {}; },
+                .filter => { _ = self.primFilter() catch {}; },
+                .println => { _ = self.primPrintln() catch {}; },
+                .load => { _ = self._load(items) catch {}; },
+                .import => { _ = self.primImport() catch {}; },
                 // Predicate builtins
-                .equal => { _ = self.primEqual() catch unreachable; },
-                .even => { _ = self.primEven() catch unreachable; },
-                .odd => { _ = self.primOdd() catch unreachable; },
-                .positive => { _ = self.primPositive() catch unreachable; },
-                .negative => { _ = self.primNegative() catch unreachable; },
-                .type_of => { _ = self.primTypeOf() catch unreachable; },
+                .equal => { _ = self.primEqual() catch {}; },
+                .even => { _ = self.primEven() catch {}; },
+                .odd => { _ = self.primOdd() catch {}; },
+                .positive => { _ = self.primPositive() catch {}; },
+                .negative => { _ = self.primNegative() catch {}; },
+                .type_of => { _ = self.primTypeOf() catch {}; },
             }
             return self.pop() orelse {
                 const obj = try self.allocator.create(LispObject);
@@ -2189,47 +2189,47 @@ pub fn init(allocator: Allocator, env: *Environment) Vm {
                             self.push(evaluatedArgs[i]);
                         }
                         switch (kind) {
-                            .add => { _ = self.primAdd() catch unreachable; },
-                            .sub => { _ = self.primSub() catch unreachable; },
-                            .mul => { _ = self.primMul() catch unreachable; },
-                            .div => { _ = self.primDiv() catch unreachable; },
-                            .rem => { _ = self.primRem() catch unreachable; },
-                            .bit_and => { _ = self.primBitAnd() catch unreachable; },
-                            .bit_or => { _ = self.primBitOr() catch unreachable; },
-                            .bit_not => { _ = self.primBitNot() catch unreachable; },
-                            .bit_shl => { _ = self.primBitShl() catch unreachable; },
-                            .bit_shr => { _ = self.primBitShr() catch unreachable; },
-                            .eq => { _ = self.primEq() catch unreachable; },
-                            .lt => { _ = self.primLt() catch unreachable; },
-                            .gt => { _ = self.primGt() catch unreachable; },
-                            .le => { _ = self.primLe() catch unreachable; },
-                            .ge => { _ = self.primGe() catch unreachable; },
-                            .cons => { _ = self.primCons() catch unreachable; },
-                            .car => { _ = self.primCar() catch unreachable; },
-                            .cdr => { _ = self.primCdr() catch unreachable; },
-                            .print => { _ = self.primPrint() catch unreachable; },
-                            .null => { _ = self.primNullQ() catch unreachable; },
-                            .not => { _ = self.primNot() catch unreachable; },
-                            .symbol => { _ = self.primSymbolQ() catch unreachable; },
-                            .number => { _ = self.primNumberQ() catch unreachable; },
-                            .list => { _ = self.primListQ() catch unreachable; },
-                            .length => { _ = self.primLength() catch unreachable; },
-                            .append => { _ = self.primAppend() catch unreachable; },
-                            .reverse => { _ = self.primReverse() catch unreachable; },
-                            .member => { _ = self.primMember() catch unreachable; },
-                            .assoc => { _ = self.primAssoc() catch unreachable; },
-                            .map => { _ = self.primMap() catch unreachable; },
-                            .filter => { _ = self.primFilter() catch unreachable; },
-                            .println => { _ = self.primPrintln() catch unreachable; },
-                            .load => { _ = self._load(items) catch unreachable; },
-                            .import => { _ = self.primImport() catch unreachable; },
+                            .add => { _ = self.primAdd() catch {}; },
+                            .sub => { _ = self.primSub() catch {}; },
+                            .mul => { _ = self.primMul() catch {}; },
+                            .div => { _ = self.primDiv() catch {}; },
+                            .rem => { _ = self.primRem() catch {}; },
+                            .bit_and => { _ = self.primBitAnd() catch {}; },
+                            .bit_or => { _ = self.primBitOr() catch {}; },
+                            .bit_not => { _ = self.primBitNot() catch {}; },
+                            .bit_shl => { _ = self.primBitShl() catch {}; },
+                            .bit_shr => { _ = self.primBitShr() catch {}; },
+                            .eq => { _ = self.primEq() catch {}; },
+                            .lt => { _ = self.primLt() catch {}; },
+                            .gt => { _ = self.primGt() catch {}; },
+                            .le => { _ = self.primLe() catch {}; },
+                            .ge => { _ = self.primGe() catch {}; },
+                            .cons => { _ = self.primCons() catch {}; },
+                            .car => { _ = self.primCar() catch {}; },
+                            .cdr => { _ = self.primCdr() catch {}; },
+                            .print => { _ = self.primPrint() catch {}; },
+                            .null => { _ = self.primNullQ() catch {}; },
+                            .not => { _ = self.primNot() catch {}; },
+                            .symbol => { _ = self.primSymbolQ() catch {}; },
+                            .number => { _ = self.primNumberQ() catch {}; },
+                            .list => { _ = self.primListQ() catch {}; },
+                            .length => { _ = self.primLength() catch {}; },
+                            .append => { _ = self.primAppend() catch {}; },
+                            .reverse => { _ = self.primReverse() catch {}; },
+                            .member => { _ = self.primMember() catch {}; },
+                            .assoc => { _ = self.primAssoc() catch {}; },
+                            .map => { _ = self.primMap() catch {}; },
+                            .filter => { _ = self.primFilter() catch {}; },
+                            .println => { _ = self.primPrintln() catch {}; },
+                            .load => { _ = self._load(items) catch {}; },
+                            .import => { _ = self.primImport() catch {}; },
                             // Predicate builtins
-                            .equal => { _ = self.primEqual() catch unreachable; },
-                            .even => { _ = self.primEven() catch unreachable; },
-                            .odd => { _ = self.primOdd() catch unreachable; },
-                            .positive => { _ = self.primPositive() catch unreachable; },
-                            .negative => { _ = self.primNegative() catch unreachable; },
-                            .type_of => { _ = self.primTypeOf() catch unreachable; },
+                            .equal => { _ = self.primEqual() catch {}; },
+                            .even => { _ = self.primEven() catch {}; },
+                            .odd => { _ = self.primOdd() catch {}; },
+                            .positive => { _ = self.primPositive() catch {}; },
+                            .negative => { _ = self.primNegative() catch {}; },
+                            .type_of => { _ = self.primTypeOf() catch {}; },
                         }
                         return self.pop() orelse {
                             const obj = try self.allocator.create(LispObject);

@@ -246,7 +246,7 @@ test "Vm — push and pop" {
     defer arena.deinit();
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const obj = alloc.create(LispObject) catch unreachable;
@@ -265,7 +265,7 @@ test "Vm — peek does not remove" {
     defer arena.deinit();
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const obj = alloc.create(LispObject) catch unreachable;
@@ -286,7 +286,7 @@ test "Vm — drop" {
     defer arena.deinit();
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     for (0..5) |i| {
@@ -306,7 +306,7 @@ test "primAdd — 2 + 3 = 5" {
     defer arena.deinit();
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const a = alloc.create(LispObject) catch unreachable;
@@ -331,7 +331,7 @@ test "primSub — 10 - 4 = 6" {
     defer arena.deinit();
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const b = alloc.create(LispObject) catch unreachable;
@@ -355,7 +355,7 @@ test "primMul — 3 * 4 * 5" {
     defer arena.deinit();
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const c = alloc.create(LispObject) catch unreachable;
@@ -384,7 +384,7 @@ test "primDiv — 20 / 4 = 5" {
     defer arena.deinit();
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const b = alloc.create(LispObject) catch unreachable;
@@ -408,7 +408,7 @@ test "primEq — 5 == 5 returns 1" {
     defer arena.deinit();
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const b = alloc.create(LispObject) catch unreachable;
@@ -432,7 +432,7 @@ test "primEq — 3 == 7 returns 0" {
     defer arena.deinit();
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const b = alloc.create(LispObject) catch unreachable;
@@ -456,7 +456,7 @@ test "primLt — 3 < 7 returns 1" {
     defer arena.deinit();
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const b = alloc.create(LispObject) catch unreachable;
@@ -480,7 +480,7 @@ test "primGt — 7 > 3 returns 1" {
     defer arena.deinit();
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const b = alloc.create(LispObject) catch unreachable;
@@ -512,7 +512,7 @@ test "evalFn — creates closure object" {
     _ = try symtab.getOrPut("x");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const fnSym = try symtab.getOrPut("fn");
@@ -545,7 +545,7 @@ test "evalDefn — creates def + fn binding" {
     _ = try symtab.getOrPut("x");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const defnSym = try symtab.getOrPut("defn");
@@ -578,7 +578,7 @@ test "closure — apply simple closure" {
     const xSym = try symtab.getOrPut("x");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // Build body expression: x
@@ -634,7 +634,7 @@ test "closure — apply closure with computation" {
     _ = try symtab.getOrPut("+");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const fnSym = try symtab.getOrPut("fn");
@@ -683,7 +683,7 @@ test "eval — if with true branch" {
     _ = try symtab.getOrPut("if");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const ifSym = try symtab.getOrPut("if");
@@ -708,7 +708,7 @@ test "eval — if with false branch" {
     _ = try symtab.getOrPut("if");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const ifSym = try symtab.getOrPut("if");
@@ -733,7 +733,7 @@ test "eval — if without else" {
     _ = try symtab.getOrPut("if");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const ifSym = try symtab.getOrPut("if");
@@ -757,7 +757,7 @@ test "eval — do returns last value" {
     _ = try symtab.getOrPut("do");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const doSym = try symtab.getOrPut("do");
@@ -782,7 +782,7 @@ test "eval — cond first branch matches" {
     _ = try symtab.getOrPut("cond");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const condSym = try symtab.getOrPut("cond");
@@ -809,7 +809,7 @@ test "eval — cond no branch matches returns nil" {
     _ = try symtab.getOrPut("cond");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const condSym = try symtab.getOrPut("cond");
@@ -834,7 +834,7 @@ test "evalAtom — number returns number object" {
     const alloc = std.heap.page_allocator;
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
     const result = try vm.evalAtom(Expr{ .number = 42 }, &env);
     try std.testing.expectEqual(@as(i64, 42), result.value.number);
@@ -845,7 +845,7 @@ test "evalAtom — nil returns nil object" {
     const alloc = std.heap.page_allocator;
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
     const result = try vm.evalAtom(Expr{ .nil = {} }, &env);
     try std.testing.expectEqual(ObjType.nil, result.type);
@@ -861,7 +861,7 @@ test "def — bind value in root env" {
     _ = try symtab.getOrPut("x");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const defSym = try symtab.getOrPut("def");
@@ -895,7 +895,7 @@ test "eval — number literal" {
     const alloc = std.heap.page_allocator;
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
     const result = try vm.eval(Expr{ .number = 42 }, &env);
     try std.testing.expectEqual(@as(i64, 42), result.value.number);
@@ -910,7 +910,7 @@ test "eval — + primitive call (a + b)" {
     _ = try symtab.getOrPut("+");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const plusSym = try symtab.getOrPut("+");
@@ -934,7 +934,7 @@ test "eval — nested + call" {
     _ = try symtab.getOrPut("+");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const plusSym = try symtab.getOrPut("+");
@@ -971,7 +971,7 @@ test "TCO — eval loop processes 1000 nested calls without overflow" {
     _ = try symtab.getOrPut("+");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // 1000 sequential eval() calls all re-enter the same while-loop.
@@ -998,7 +998,7 @@ test "primCons — creates a cons cell" {
     _ = try symtab.getOrPut("cons");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (cons 1 2)
@@ -1024,7 +1024,7 @@ test "primCar — gets first element" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // Build: (car (cons 42 99))
@@ -1053,7 +1053,7 @@ test "primCdr — gets second element" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // Build: (cdr (cons 42 99))
@@ -1081,7 +1081,7 @@ test "primPrint — prints and returns nil" {
     _ = try symtab.getOrPut("print");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (print 42) — should print "42" and return nil
@@ -1105,7 +1105,7 @@ test "primPrint — prints list (cons 1 (cons 2 nil))" {
     _ = try symtab.getOrPut("cons");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // Build (cons 1 (cons 2 nil))
@@ -1141,7 +1141,7 @@ test "null? — true for nil (fixed)" {
     _ = try symtab.getOrPut("null?");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const items: []Expr = try alloc.dupe(Expr, &[2]Expr{
@@ -1163,7 +1163,7 @@ test "null? — false for non-nil" {
     _ = try symtab.getOrPut("null?");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const items: []Expr = try alloc.dupe(Expr, &[2]Expr{
@@ -1187,7 +1187,7 @@ test "symbol? — returns 0 for unbound symbol (evaluates to nil)" {
     _ = try symtab.getOrPut("symbol?");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const items: []Expr = try alloc.dupe(Expr, &[2]Expr{
@@ -1210,7 +1210,7 @@ test "number? — returns 1 for numbers, 0 for nil" {
     _ = try symtab.getOrPut("symbol?");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const items: []Expr = try alloc.dupe(Expr, &[2]Expr{
@@ -1232,7 +1232,7 @@ test "number? — true for numbers (fixed)" {
     _ = try symtab.getOrPut("number?");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const items: []Expr = try alloc.dupe(Expr, &[2]Expr{
@@ -1255,7 +1255,7 @@ test "list? — true for cons and nil, false for numbers" {
     _ = try symtab.getOrPut("cons");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // list? on nil
@@ -1306,7 +1306,7 @@ test "quote — returns number unevaluated" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (quote 42) should return 42
@@ -1343,7 +1343,7 @@ test "quote — returns nil unevaluated" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (quote nil) should return nil
@@ -1365,7 +1365,7 @@ test "quote — returns list (not evaluated)" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (quote (+ 1 2)) should return a list, not 3
@@ -1393,7 +1393,7 @@ test "length — returns 0 for nil" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const items: []Expr = try alloc.dupe(Expr, &[2]Expr{
@@ -1416,7 +1416,7 @@ test "length — returns count of list elements" {
     _ = try symtab.getOrPut("length");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // Build list: (cons 3 (cons 2 (cons 1 nil)))
@@ -1476,7 +1476,7 @@ test "defmacro — creates a macro closure" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defmacro square (x) (cons (quote *) (cons x x)))
@@ -1537,7 +1537,7 @@ test "macro — simple expansion" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // Macro: (defmacro add-one (x) (list '+ x 1))
@@ -1666,7 +1666,7 @@ test "edge case — car of single element" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     _ = try symtab.getOrPut("car");
@@ -1697,7 +1697,7 @@ test "edge case — cdr of single element" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     _ = try symtab.getOrPut("cdr");
@@ -1730,7 +1730,7 @@ test "load builtin — registered in dispatch table" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     _ = try symtab.getOrPut("load");
@@ -1771,7 +1771,7 @@ test "macro — when/unless pattern" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defmacro add-twelve (x) (+ x 12))
@@ -1827,7 +1827,7 @@ test "macro — nested expansion with if" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defmacro square (x) (* x x))
@@ -1883,7 +1883,7 @@ test "REPL — processes input lines in a loop" {
     _ = try symtab.getOrPut("print");
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // Simulate REPL: eval a few expressions and check results
@@ -1911,7 +1911,7 @@ test "primAppend — appends two lists" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     _ = try symtab.getOrPut("append");
@@ -1950,7 +1950,7 @@ test "primReverse — reverses a list" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     _ = try symtab.getOrPut("reverse");
@@ -1995,7 +1995,7 @@ test "primMember — finds element in list" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     _ = try symtab.getOrPut("member");
@@ -2041,7 +2041,7 @@ test "primAssoc — looks up in association list" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     _ = try symtab.getOrPut("assoc");
@@ -2082,7 +2082,7 @@ test "primMap — applies function to list" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     _ = try symtab.getOrPut("map");
@@ -2146,7 +2146,7 @@ test "primFilter — filters list by predicate" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     _ = try symtab.getOrPut("filter");
@@ -2216,7 +2216,7 @@ test "evalLet — basic binding" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     _ = try symtab.getOrPut("let");
@@ -2270,7 +2270,7 @@ test "evalLet — shadowing" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     _ = try symtab.getOrPut("let");
@@ -2340,7 +2340,7 @@ test "evalLet — binding visibility to next binding" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     _ = try symtab.getOrPut("let");
@@ -2401,7 +2401,7 @@ test "defpackage — registers a package name" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // Build: (defpackage my-pkg)
@@ -2429,7 +2429,7 @@ test "defpackage — registers multiple packages" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defpackage std-lib)
@@ -2464,7 +2464,7 @@ test "defpackage — rejects non-symbol name" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defpackage 42) — number instead of symbol
@@ -2485,7 +2485,7 @@ test "import — stub returns nil without error" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // First define a package
@@ -2519,7 +2519,7 @@ test "import — nil is a no-op" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (import nil)
@@ -2544,7 +2544,7 @@ test "defpackage + import — package registration enables symbol resolution" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defpackage math-lib)
@@ -2583,7 +2583,7 @@ test "load — reads a file and evaluates expressions" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // Load test_load.lisp which defines test-fn (uses only builtins: +, defn)
@@ -2625,7 +2625,7 @@ test "example — even? inline: (even? 4) = 0 (false)" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     const evenSym = try symtab.getOrPut("even?");
@@ -3208,10 +3208,10 @@ test "bytecode — simple number" {
     defer arena.deinit();
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (number 42)
@@ -3229,10 +3229,10 @@ test "bytecode — add two numbers" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (+ 10 20)
@@ -3254,10 +3254,10 @@ test "bytecode — if true branch" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (if 1 42 99)
@@ -3280,10 +3280,10 @@ test "bytecode — if false branch" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (if nil 42 99) — nil is falsey, so should return 99
@@ -3306,10 +3306,10 @@ test "bytecode — def and lookup" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (def x 42)
@@ -3337,10 +3337,10 @@ test "bytecode — mul two numbers" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (* 6 7)
@@ -3361,10 +3361,10 @@ test "bytecode — nested arithmetic" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (+ (* 2 3) 4) = 10
@@ -3389,10 +3389,10 @@ test "bytecode — sub two numbers" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (- 30 10)
@@ -3413,10 +3413,10 @@ test "bytecode — div two numbers" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (/ 84 2)
@@ -3437,10 +3437,10 @@ test "bytecode — eq comparison" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (= 42 42)
@@ -3461,10 +3461,10 @@ test "bytecode — lt comparison" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (< 5 10)
@@ -3485,10 +3485,10 @@ test "bytecode — gt comparison" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (> 10 5)
@@ -3509,10 +3509,10 @@ test "bytecode — let bindings" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (let [a 10 b 20] (+ a b))
@@ -3542,10 +3542,10 @@ test "bytecode — quote" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (quote (1 2 3))
@@ -3579,10 +3579,10 @@ test "bytecode — symbol" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (def x 42)
@@ -3606,10 +3606,10 @@ test "bytecode — const_val" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (let y 7 y) — the literal 7 goes into the constant pool,
@@ -3634,10 +3634,10 @@ test "bytecode — rem" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (rem 10 3)
@@ -3658,10 +3658,10 @@ test "bytecode — le" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (<= 1 2)
@@ -3682,10 +3682,10 @@ test "bytecode — ge" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (>= 2 1)
@@ -3706,10 +3706,10 @@ test "bytecode — cons" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (cons 1 2)
@@ -3731,10 +3731,10 @@ test "bytecode — car" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (car (cons 1 nil))
@@ -3758,10 +3758,10 @@ test "bytecode — cdr" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (cdr (cons 1 nil))
@@ -3785,10 +3785,10 @@ test "bytecode — tailcall" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (defn f (x) (+ x 1))
@@ -3822,10 +3822,10 @@ test "bytecode — pop" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (do 1 2 3) - the do block emits pop between expressions
@@ -3847,10 +3847,10 @@ test "bytecode — dup" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (+ 1 2) to exercise the bytecode compilation pipeline
@@ -3877,16 +3877,16 @@ test "bytecode — jump" {
     defer arena.deinit();
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
-    bc.emitNumber(42);  // bytes 0-8, ops.len=9, stack=[42]
-    const jumpOff = bc.emitJump();  // byte 9, operand 10-13, ops.len=14, returns 10
-    bc.emitNumber(999); // bytes 14-22, ops.len=23 (should be SKIPPED)
-    bc.emitNil();       // byte 23, ops.len=24
+    try bc.emitNumber(42);  // bytes 0-8, ops.len=9, stack=[42]
+    const jumpOff = try bc.emitJump();  // byte 9, operand 10-13, ops.len=14, returns 10
+    try bc.emitNumber(999); // bytes 14-22, ops.len=23 (should be SKIPPED)
+    try bc.emitNil();       // byte 23, ops.len=24
     bc.patchJump(jumpOff, 24);  // jumps to ops.end, stack stays [42]
 
     const result = try vm.executeBytecode(&bc, &env);
@@ -3905,15 +3905,15 @@ test "bytecode — jump_if_false" {
     defer arena.deinit();
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
-    bc.emitNil();       // byte 0, ops.len=1, stack=[nil]
-    const jifOff = bc.emitJumpIfFalse();  // byte 1, operand 2-5, ops.len=6, returns 2
-    bc.emitNil();       // byte 6, ops.len=7 (should be SKIPPED)
+    try bc.emitNil();       // byte 0, ops.len=1, stack=[nil]
+    const jifOff = try bc.emitJumpIfFalse();  // byte 1, operand 2-5, ops.len=6, returns 2
+    try bc.emitNil();       // byte 6, ops.len=7 (should be SKIPPED)
     bc.patchJump(jifOff, 7);  // jumps to ops.end, stack stays [nil]
 
     const result = try vm.executeBytecode(&bc, &env);
@@ -3927,10 +3927,10 @@ test "bytecode — defn and call" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // Compile (defn double (x) (* x 2))
@@ -3970,7 +3970,7 @@ test "stdlib.lisp — first" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defn first (lst) (car lst))
@@ -4014,7 +4014,7 @@ test "stdlib.lisp — second" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defn second (lst) (car (cdr lst)))
@@ -4067,7 +4067,7 @@ test "stdlib.lisp — third" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defn third (lst) (car (cdr (cdr lst))))
@@ -4129,7 +4129,7 @@ test "stdlib.lisp — last" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defn last (lst)
@@ -4204,7 +4204,7 @@ test "stdlib.lisp — sum" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defn sum (lst)
@@ -4307,7 +4307,7 @@ test "stdlib.lisp — product" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defn product (lst)
@@ -4409,7 +4409,7 @@ test "stdlib.lisp — not" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defn not (x) (if x 0 1))
@@ -4447,7 +4447,7 @@ test "stdlib.lisp — atom?" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defn atom? (x) (if (list? x) 0 1))
@@ -4490,7 +4490,7 @@ test "stdlib.lisp — concat" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defn concat (& rest)
@@ -4550,7 +4550,7 @@ test "stdlib.lisp — and" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defn and (a b) (if (= a 1) (if (= b 1) 1 0) 0))
@@ -4625,7 +4625,7 @@ test "stdlib.lisp — or" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defn or (a b) (if (= a 1) 1 (if (= b 1) 1 0)))
@@ -4700,7 +4700,7 @@ test "stdlib.lisp — nth" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // nth uses builtins car, cdr, =, - that are available without definition
@@ -4783,7 +4783,7 @@ test "stdlib.lisp — butlast" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defn butlast (lst) (if (null? lst) nil (cons (car lst) (butlast (cdr lst)))))
@@ -4867,7 +4867,7 @@ test "stdlib.lisp — range" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // (defn range (n) (if (= n 0) nil (append (range (- n 1)) (list (- n 1)))))
@@ -5003,7 +5003,7 @@ test "stdlib.lisp — sort" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // First define list (single-element list)
@@ -5195,7 +5195,7 @@ test "stdlib.lisp — flatten" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
     // First define first, since flatten depends on it
@@ -5376,10 +5376,10 @@ test "bytecode — equal?" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // (equal? 1 1) → 1
@@ -5409,10 +5409,10 @@ test "bytecode — even? / odd?" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // (even? 4) → 1
@@ -5449,10 +5449,10 @@ test "bytecode — positive? / negative?" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // (positive? 5) → 1
@@ -5480,10 +5480,10 @@ test "bytecode — type-of" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // (type-of 42) → symbol "number"
@@ -5503,10 +5503,10 @@ test "bytecode — not" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // (not nil) → 1
@@ -5534,10 +5534,10 @@ test "bytecode — bitwise ops" {
     var symtab = SymbolTable.init(alloc, &arena);
     var env = Environment.init(null, alloc);
     defer env.deinit();
-    var vm = Vm.init(alloc, &env);
+    var vm = try Vm.init(alloc, &env);
     defer vm.deinit();
 
-    var bc = Bytecode.init(alloc);
+    var bc = try Bytecode.init(alloc);
     defer bc.deinit();
 
     // (bit-and 5 3) → 1
