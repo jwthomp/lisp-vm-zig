@@ -3134,7 +3134,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     var env = Environment.init(null, std.heap.page_allocator);
     defer env.deinit();
 
-    var vm = Vm.init(std.heap.page_allocator, &env);
+    var vm = Vm.init(std.heap.page_allocator, &env) catch unreachable;
     defer vm.deinit();
 
     // Parse command-line arguments
@@ -5492,8 +5492,8 @@ test "bytecode — type-of" {
         Expr{ .number = 42 },
     }) }, &env, &vm);
     const result = try vm.executeBytecode(&bc, &env);
-    try std.testing.expectEqual(ObjType.symbol, result.type);
-    try std.testing.expectEqualStrings("number", result.value.symbol.name[0..]);
+    try std.testing.expectEqual(ObjType.string, result.type);
+    try std.testing.expectEqualStrings("number", result.value.string);
 }
 
 test "bytecode — not" {
@@ -5587,4 +5587,171 @@ test "bytecode — bitwise ops" {
     }) }, &env, &vm);
     const result5 = try vm.executeBytecode(&bc, &env);
     try std.testing.expectEqual(@as(i64, 2), result5.value.number);
+}
+
+// --- String tests ---
+test "bytecode — str" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = try Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = try Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // (str "hello") → "hello"
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("str") },
+        Expr{ .string = "hello" },
+    }) }, &env, &vm);
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(ObjType.string, result.type);
+    try std.testing.expect(std.mem.eql(u8, result.value.string, "hello"));
+
+    // (str 42) → "42"
+    bc.clear();
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("str") },
+        Expr{ .number = 42 },
+    }) }, &env, &vm);
+    const result2 = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(ObjType.string, result2.type);
+    try std.testing.expect(std.mem.eql(u8, result2.value.string, "42"));
+}
+
+test "bytecode — str-cat" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = try Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = try Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // (str-cat "foo" "bar") → "foobar"
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("str-cat") },
+        Expr{ .string = "foo" },
+        Expr{ .string = "bar" },
+    }) }, &env, &vm);
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(ObjType.string, result.type);
+    try std.testing.expect(std.mem.eql(u8, result.value.string, "foobar"));
+
+    // (str-cat "hello" " " "world") → "hello world"
+    bc.clear();
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("str-cat") },
+        Expr{ .string = "hello" },
+        Expr{ .string = " " },
+        Expr{ .string = "world" },
+    }) }, &env, &vm);
+    const result2 = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(ObjType.string, result2.type);
+    try std.testing.expect(std.mem.eql(u8, result2.value.string, "hello world"));
+}
+
+test "bytecode — str-len" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = try Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = try Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // (str-len "hello") → 5
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("str-len") },
+        Expr{ .string = "hello" },
+    }) }, &env, &vm);
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 5), result.value.number);
+
+    // (str-len "") → 0
+    bc.clear();
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("str-len") },
+        Expr{ .string = "" },
+    }) }, &env, &vm);
+    const result2 = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 0), result2.value.number);
+}
+
+test "bytecode — str=?" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = try Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = try Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // (str=? "abc" "abc") → 1
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("str=?") },
+        Expr{ .string = "abc" },
+        Expr{ .string = "abc" },
+    }) }, &env, &vm);
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 1), result.value.number);
+
+    // (str=? "abc" "def") → 0
+    bc.clear();
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("str=?") },
+        Expr{ .string = "abc" },
+        Expr{ .string = "def" },
+    }) }, &env, &vm);
+    const result2 = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(@as(i64, 0), result2.value.number);
+}
+
+test "bytecode — type-of string" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = try Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = try Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // (type-of "hello") → string "string"
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("type-of") },
+        Expr{ .string = "hello" },
+    }) }, &env, &vm);
+    const result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(ObjType.string, result.type);
+    try std.testing.expect(std.mem.eql(u8, result.value.string, "string"));
+
+    // (type-of 42) → string "number"
+    bc.clear();
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("type-of") },
+        Expr{ .number = 42 },
+    }) }, &env, &vm);
+    const result2 = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(ObjType.string, result2.type);
+    try std.testing.expect(std.mem.eql(u8, result2.value.string, "number"));
 }

@@ -23,6 +23,7 @@ pub const Token = enum(u8) {
     quote,
     symbol,
     number,
+    str_lit,
     eof,
 
     pub fn toToken(c: u8) ?Token {
@@ -105,6 +106,29 @@ pub const Lexer = struct {
             self.current_text = self.input[num_start..self.pos];
             return .number;
         }
+        if (c == '"') {
+            self.pos += 1;
+            const str_start = self.pos;
+            var escaped: bool = false;
+            while (self.pos < self.input.len) {
+                const ch = self.input[self.pos];
+                if (escaped) {
+                    escaped = false;
+                    self.pos += 1;
+                    continue;
+                }
+                if (ch == '"') {
+                    break;
+                }
+                if (ch == '\\') {
+                    escaped = true;
+                }
+                self.pos += 1;
+            }
+            self.current_text = self.input[str_start..self.pos];
+            self.pos += 1;
+            return .str_lit;
+        }
         if (std.ascii.isAlphabetic(c) or c == '+' or c == '-' or c == '*' or c == '/' or
             c == '=' or c == '<' or c == '>' or c == '_' or c == '!' or c == '?' or c == '$' or
             c == '.')
@@ -181,6 +205,7 @@ pub const Expr = union(enum) {
     symbol: *Symbol,
     number: i64,
     list: []Expr,
+    string: []const u8,
     nil,
 
     pub fn nilExpr() Expr { return Expr{ .nil = {} }; }
@@ -278,6 +303,9 @@ pub const Parser = struct {
                 const sym = try self.symtab.getOrPut(text);
                 break :blk Expr{ .symbol = sym };
             },
+            .str_lit => blk: {
+                break :blk Expr{ .string = try self.arena.allocator().dupe(u8, text) };
+            },
             else => Expr.nilExpr(),
         };
     }
@@ -317,6 +345,7 @@ pub const ObjType = enum(u8) {
     closure,
     builtin,
     err,
+    string,
 };
 
 pub const LispObject = struct {
@@ -333,6 +362,7 @@ pub const LispObject = struct {
         closure: *Closure,
         builtin: []const u8,
         err: []const u8,
+        string: []const u8,
     };
 
     pub fn nilObj() LispObject {
@@ -349,6 +379,10 @@ pub const LispObject = struct {
 
     pub fn errorObj(msg: []const u8) LispObject {
         return LispObject{ .type = .err, .value = .{ .err = msg }, .next = null, .marked = false };
+    }
+
+    pub fn stringObj(s: []const u8) LispObject {
+        return LispObject{ .type = .string, .value = .{ .string = s }, .next = null, .marked = false };
     }
 };
 
@@ -368,6 +402,7 @@ pub const BuiltinKind = enum {
     println, load, import,
     // Predicates
     equal, even, odd, positive, negative, type_of,
+    str, str_cat, str_len, str_eq,
 };
 
 pub const ConsCell = struct {

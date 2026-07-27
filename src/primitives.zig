@@ -265,6 +265,10 @@ pub fn emitConstRef(self: *Bytecode, sym: *Symbol) !u32 {
                     try self.emitSymbol(try vm._addConstantSymbol(sym));
                 }
             },
+            .string => |s| {
+                const idx = try vm._addConstantStr(s);
+                try self.emitConstVal(idx);
+            },
             .list => |items| {
                 if (items.len == 0) {
                     try self.emitNil();
@@ -494,10 +498,10 @@ pub fn emitConstRef(self: *Bytecode, sym: *Symbol) !u32 {
                 while (clean.len > 0 and clean[clean.len - 1] == 0) clean = clean[0 .. clean.len - 1];
                 debugPrint("compileCall: checking builtin '{s}'\n", .{clean});
                 if (vm.dispatch_table.get(clean)) |_| {
-                    // It's a builtin - add to bytecode constants
+                    // It's a builtin - add to bytecode constants, emit as symbol lookup
                     const nameIdx = try self.emitConstRef(sym);
                     debugPrint("emitConstRef: added symbol '{s}' at idx {d}\n", .{ sym.name[0..], nameIdx });
-                    try self.emitConstVal(nameIdx);
+                    try self.emitSymbol(nameIdx);
                 } else {
                     // Not a builtin — regular symbol lookup
                     debugPrint("compileCall: '{s}' not found in dispatch_table\n", .{clean});
@@ -527,6 +531,7 @@ pub const Vm = struct {
     packageTable: std.StringHashMap([]const u8),
     gcHeap: std.ArrayList(*LispObject),
     bytecode_constants: std.ArrayList(*LispObject),
+    bytecode_compile_constants: std.ArrayList(*LispObject),
 
 pub fn init(allocator: Allocator, env: *Environment) !Vm {
         const dt = try allocator.create(std.StringHashMap(BuiltinKind));
@@ -542,6 +547,7 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
             .packageTable = std.StringHashMap([]const u8).init(allocator),
             .gcHeap = try std.ArrayList(*LispObject).initCapacity(allocator, 64),
             .bytecode_constants = try std.ArrayList(*LispObject).initCapacity(allocator, 64),
+            .bytecode_compile_constants = try std.ArrayList(*LispObject).initCapacity(allocator, 64),
         };
 
         // Register all builtins
@@ -586,6 +592,11 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
         try vm._registerBuiltin("positive?", .positive);
         try vm._registerBuiltin("negative?", .negative);
         try vm._registerBuiltin("type-of", .type_of);
+        // String builtins
+        try vm._registerBuiltin("str", .str);
+        try vm._registerBuiltin("str-cat", .str_cat);
+        try vm._registerBuiltin("str-len", .str_len);
+        try vm._registerBuiltin("str=?", .str_eq);
 
         return vm;
     }
@@ -609,6 +620,7 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
         self.gcHeap.deinit(self.allocator);
         self.macroArgs.deinit();
         self.bytecode_constants.deinit(self.allocator);
+        self.bytecode_compile_constants.deinit(self.allocator);
         var it = self.dispatch_table.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -741,6 +753,17 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
         return idx;
     }
 
+fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
+        const copy = try self.allocator.alloc(u8, s.len);
+        @memcpy(copy, s);
+        const obj = try self.allocator.create(LispObject);
+        self.gcRegister(obj);
+        obj.* = LispObject.stringObj(copy);
+        const idx: u32 = @intCast(self.bytecode_compile_constants.items.len);
+        self.bytecode_compile_constants.appendAssumeCapacity(obj);
+        return idx;
+    }
+
     /// Add an Expr converted to a LispObject constant and return its index
     pub fn _addConstantExpr(self: *Vm, expr: Expr) !u32 {
         const obj = try self.allocator.create(LispObject);
@@ -753,6 +776,11 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
             },
             .symbol => |sym| {
                 obj.* = LispObject.symbolObj(sym);
+            },
+            .string => |s| {
+                const copy = try self.allocator.dupe(u8, s);
+                self.gcRegister(obj);
+                obj.* = LispObject.stringObj(copy);
             },
             .list => |items| {
                 // Convert AST list to a ConsCell chain, returning a LispObject of type .cons
@@ -789,6 +817,12 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
                                 break :blk o;
                             },
                             .list => blk: {
+                                const o = try self.allocator.create(LispObject);
+                                self.gcRegister(o);
+                                o.* = LispObject.nilObj();
+                                break :blk o;
+                            },
+                            .string => blk: {
                                 const o = try self.allocator.create(LispObject);
                                 self.gcRegister(o);
                                 o.* = LispObject.nilObj();
@@ -1198,12 +1232,118 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
             .cons => "list",
             .builtin => "builtin",
             .closure => "closure",
+            .string => "string",
             else => "unknown",
         };
-        const sym = try self.allocator.create(Symbol);
-        sym.* = Symbol{ .name = name };
-        result.* = LispObject.symbolObj(sym);
+        const copy = try self.allocator.alloc(u8, name.len);
+        @memcpy(copy, name);
+        result.* = LispObject.stringObj(copy);
         self.push(result);
+    }
+
+    /// (str val...) — concatenate all arguments into a single string
+    pub fn primStr(self: *Vm) !void {
+        var args: [16]*LispObject = undefined;
+        const count = self.stack.items.len;
+        if (count == 0) {
+            const obj = try self.allocator.create(LispObject);
+            self.gcRegister(obj);
+            obj.* = LispObject.stringObj("");
+            self.push(obj);
+            return;
+        }
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            args[count - 1 - i] = self.pop() orelse return error.StackUnderflow;
+        }
+        var totalLen: usize = 0;
+        i = 0;
+        while (i < count) : (i += 1) {
+            switch (args[i].value) {
+                .string => |s| totalLen += s.len,
+                .number => |n| totalLen += i64ToBufLen(n),
+                .nil => {},
+                .symbol => |sym| totalLen += sym.name.len,
+                else => {},
+            }
+        }
+        const buf = try self.allocator.alloc(u8, totalLen);
+        var pos: usize = 0;
+        i = 0;
+        while (i < count) : (i += 1) {
+            switch (args[i].value) {
+                .string => |s| {
+                    if (pos + s.len <= buf.len) {
+                        @memcpy(buf[pos .. pos + s.len], s);
+                        pos += s.len;
+                    }
+                },
+                .number => |n| {
+                    const s = i64ToBuf(n);
+                    if (pos + s.len <= buf.len) {
+                        @memcpy(buf[pos .. pos + s.len], s);
+                        pos += s.len;
+                    }
+                },
+                .nil => {},
+                .symbol => |sym| {
+                    const s = sym.name[0..];
+                    if (pos + s.len <= buf.len) {
+                        @memcpy(buf[pos .. pos + s.len], s);
+                        pos += s.len;
+                    }
+                },
+                else => {},
+            }
+        }
+        const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
+        result.* = LispObject.stringObj(buf);
+        self.push(result);
+    }
+
+    /// (str+ a b) — alias for concatenation (same as str with 2 args)
+    pub fn primStrCat(self: *Vm) !void {
+        try self.primStr(); // reuse the same logic for 2-argument concatenation
+    }
+
+    /// (str-len s) — return length of string as number
+    pub fn primStrLen(self: *Vm) !void {
+        const obj = self.pop() orelse return error.StackUnderflow;
+        const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
+        const len: i64 = switch (obj.value) {
+            .string => |s| @intCast(s.len),
+            else => 0,
+        };
+        result.* = LispObject.numberObj(len);
+        self.push(result);
+    }
+
+    /// (str=? a b) — compare two strings for equality, return 1 or 0
+    pub fn primStrEq(self: *Vm) !void {
+        const b = self.pop() orelse return error.StackUnderflow;
+        const a = self.pop() orelse return error.StackUnderflow;
+        const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
+        const eq = if (a.type == .string and b.type == .string)
+            std.mem.eql(u8, a.value.string, b.value.string)
+        else
+            false;
+        result.* = LispObject.numberObj(if (eq) 1 else 0);
+        self.push(result);
+    }
+
+    fn i64ToBuf(n: i64) []const u8 {
+        var buf: [32]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "{d}", .{n}) catch "";
+        return s;
+    }
+
+    fn i64ToBufLen(n: i64) usize {
+        var buf: [32]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "{d}", .{n}) catch "";
+        return s.len;
     }
 
     /// length(lst) — count cons cells in a list
@@ -1604,6 +1744,7 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
                 }
             },
             .closure => { const s = "#<closure>"; std.mem.copyForwards(u8, buf[pos.*..], s); pos.* += s.len; },
+            .string => |s| { std.mem.copyForwards(u8, buf[pos.*..], s); pos.* += s.len; },
             .builtin => { const s = "#<builtin>"; std.mem.copyForwards(u8, buf[pos.*..], s); pos.* += s.len; },
             .err => |msg| { std.mem.copyForwards(u8, buf[pos.*..], msg); pos.* += msg.len; },
         }
@@ -1865,6 +2006,12 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
                 obj.* = LispObject.numberObj(n);
                 return obj;
             },
+            .string => |s| {
+                const obj = try self.allocator.create(LispObject);
+                self.gcRegister(obj);
+                obj.* = LispObject.stringObj(s);
+                return obj;
+            },
             .symbol => |sym| {
                 // Use sym.name directly — StringHashMap handles the null terminator
                 if (env.lookup(sym.name)) |v| return v;
@@ -1892,6 +2039,12 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
                 self.gcRegister(o);
                 o.* = LispObject.numberObj(n);
                 break :blk o;
+            },
+            .string => blk: {
+                const o_num = try self.allocator.create(LispObject);
+                self.gcRegister(o_num);
+                o_num.* = LispObject.stringObj(expr.string);
+                break :blk o_num;
             },
             .symbol => blk: {
                 const o = try self.allocator.create(LispObject);
@@ -1926,6 +2079,13 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
                 const obj = try self.allocator.create(LispObject);
                 self.gcRegister(obj);
                 obj.* = LispObject.nilObj();
+                break :blk obj;
+            },
+            .string => |s| blk: {
+                const obj = try self.allocator.create(LispObject);
+                self.gcRegister(obj);
+                const duped = try self.allocator.dupe(u8, s);
+                obj.* = LispObject.stringObj(duped);
                 break :blk obj;
             },
             else => return error.DefUnsupportedValue,
@@ -1977,6 +2137,13 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
                     o.* = LispObject.nilObj();
                     break :blk o;
                 },
+                .string => blk: {
+                    const o = try self.allocator.create(LispObject);
+                    self.gcRegister(o);
+                    const duped = try self.allocator.dupe(u8, ast[i - 1].string);
+                    o.* = LispObject.stringObj(duped);
+                    break :blk o;
+                },
             };
 
             cons_cell.* = ConsCell{
@@ -2021,6 +2188,13 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
             },
             .list => {
                 return try self._buildConsList(arg.list);
+            },
+            .string => |s| {
+                const obj = try self.allocator.create(LispObject);
+                self.gcRegister(obj);
+                const duped = try self.allocator.dupe(u8, s);
+                obj.* = LispObject.stringObj(duped);
+                return obj;
             },
         }
     }
@@ -2134,6 +2308,10 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
                 .positive => { _ = self.primPositive() catch {}; },
                 .negative => { _ = self.primNegative() catch {}; },
                 .type_of => { _ = self.primTypeOf() catch {}; },
+                .str => { _ = self.primStr() catch {}; },
+                .str_cat => { _ = self.primStrCat() catch {}; },
+                .str_len => { _ = self.primStrLen() catch {}; },
+                .str_eq => { _ = self.primStrEq() catch {}; },
             }
             return self.pop() orelse {
                 const obj = try self.allocator.create(LispObject);
@@ -2230,6 +2408,10 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
                             .positive => { _ = self.primPositive() catch {}; },
                             .negative => { _ = self.primNegative() catch {}; },
                             .type_of => { _ = self.primTypeOf() catch {}; },
+                            .str => { _ = self.primStr() catch {}; },
+                            .str_cat => { _ = self.primStrCat() catch {}; },
+                            .str_len => { _ = self.primStrLen() catch {}; },
+                            .str_eq => { _ = self.primStrEq() catch {}; },
                         }
                         return self.pop() orelse {
                             const obj = try self.allocator.create(LispObject);
@@ -2448,6 +2630,9 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
                     const nested = try self.deepCopyExprList(items);
                     copy[i] = Expr{ .list = nested };
                 },
+                .string => |s| {
+                    copy[i] = Expr{ .string = s };
+                },
             }
             i += 1;
         }
@@ -2645,6 +2830,7 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
             .nil => Expr.nilExpr(),
             .number => |n| Expr{ .number = n },
             .symbol => |sym| Expr{ .symbol = sym },
+            .string => |s| Expr{ .string = s },
             .list => |items| blk: {
                 const duped = try self.allocator.dupe(Expr, items);
                 break :blk Expr{ .list = duped };
@@ -2697,6 +2883,12 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
                     const obj = try self.allocator.create(LispObject);
                     self.gcRegister(obj);
                     obj.* = LispObject.numberObj(n);
+                    return obj;
+                },
+                .string => |s| {
+                    const obj = try self.allocator.create(LispObject);
+                    self.gcRegister(obj);
+                    obj.* = LispObject.stringObj(s);
                     return obj;
                 },
                 .symbol => |sym| {
@@ -2852,17 +3044,21 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
                                 .odd => try self.primOdd(),
                                 .positive => try self.primPositive(),
                                 .negative => try self.primNegative(),
-                                .type_of => try self.primTypeOf(),
-                            }
-                            return self.pop() orelse {
-                                const obj = try self.allocator.create(LispObject);
-                                obj.* = LispObject.nilObj();
-                                return obj;
-                            };
+.type_of => try self.primTypeOf(),
+                            .str => try self.primStr(),
+                            .str_cat => try self.primStrCat(),
+                            .str_len => try self.primStrLen(),
+                            .str_eq => try self.primStrEq(),
                         }
+                        return self.pop() orelse {
+                            const obj = try self.allocator.create(LispObject);
+                            obj.* = LispObject.nilObj();
+                            return obj;
+                        };
                     }
+                }
 
-                    // Unknown function — pop args that were pushed
+                // Unknown function — pop args that were pushed
 
                     ai = 1;
                     while (ai < items.len) : (ai += 1) {
@@ -2960,27 +3156,20 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
                         (@as(u32, bc.ops.items[pc + 2]) << 16) | (@as(u32, bc.ops.items[pc + 3]) << 24);
                     pc += 4;
                     debugPrint("const_val: idx={d}, bc.constants.items.len={d}\n", .{ idx, bc.constants.items.len });
-                    const val = bc.getConstant(idx) orelse {
+                    const val: ?*LispObject = if (idx < self.bytecode_compile_constants.items.len)
+                        self.bytecode_compile_constants.items[idx]
+                    else
+                        null;
+                    if (val == null) {
                         debugPrint("const_val: constant not found at idx {d}\n", .{idx});
                         const obj = try self.allocator.create(LispObject);
                         self.gcRegister(obj);
                         obj.* = LispObject.nilObj();
                         self.push(obj);
                         continue;
-                    };
-                    self.push(val);
-                    // Check if it's a builtin name and push builtin object instead
-                    if (self.dispatch_table.get(val.value.symbol.name[0..])) |_| {
-                        _ = self.pop(); // Remove the symbol object
-                        const builtinObj = try self.allocator.create(LispObject);
-                        self.gcRegister(builtinObj);
-                        builtinObj.* = LispObject{
-                            .type = .builtin,
-                            .value = .{ .builtin = val.value.symbol.name[0..] },
-                            .next = null,
-                            .marked = false,
-                        };
-                        self.push(builtinObj);
+                    }
+                    if (val) |v| {
+                        self.push(v);
                     }
                 },
                 .jump => {
@@ -3115,6 +3304,10 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
                                     .negative => try self.primNegative(),
                                     .type_of => try self.primTypeOf(),
                                     .println => try self.primPrintln(),
+                                    .str => try self.primStr(),
+                                    .str_cat => try self.primStrCat(),
+                                    .str_len => try self.primStrLen(),
+                                    .str_eq => try self.primStrEq(),
                                     else => {},
                                 }
                             }
@@ -3230,7 +3423,10 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
                                                 (@as(u32, bodyOps.items[bodyPc + 2]) << 16) |
                                                 (@as(u32, bodyOps.items[bodyPc + 3]) << 24);
                                             bodyPc += 4;
-                                            const val = if (idx < bc.constants.items.len) bc.constants.items[idx] else null;
+                                            const val = if (idx < self.bytecode_compile_constants.items.len)
+                                                self.bytecode_compile_constants.items[idx]
+                                            else
+                                                null;
                                             if (val) |v| {
                                                 self.push(v);
                                             } else {
@@ -3286,6 +3482,10 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
                                                             .type_of => try self.primTypeOf(),
                                                             .filter => try self.primFilter(),
                                                             .println => try self.primPrintln(),
+                                                            .str => try self.primStr(),
+                                                            .str_cat => try self.primStrCat(),
+                                                            .str_len => try self.primStrLen(),
+                                                            .str_eq => try self.primStrEq(),
                                                             else => {},
                                                         }
                                                     }
@@ -3375,7 +3575,10 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
                                                                         (@as(u32, nestedBodyOps.items[nbPc + 2]) << 16) |
                                                                         (@as(u32, nestedBodyOps.items[nbPc + 3]) << 24);
                                                                     nbPc += 4;
-                                                                    const cval = if (cidx < bc.constants.items.len) bc.constants.items[cidx] else null;
+                                                                    const cval = if (cidx < self.bytecode_compile_constants.items.len)
+                                                                        self.bytecode_compile_constants.items[cidx]
+                                                                      else
+                                                                        null;
                                                                     if (cval) |cv| {
                                                                         self.push(cv);
                                                                     } else {
@@ -3431,6 +3634,10 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
                                                             .type_of => try self.primTypeOf(),
                                                             .filter => try self.primFilter(),
                                                             .println => try self.primPrintln(),
+                                                            .str => try self.primStr(),
+                                                            .str_cat => try self.primStrCat(),
+                                                            .str_len => try self.primStrLen(),
+                                                            .str_eq => try self.primStrEq(),
                                                             else => {},
                                                         }
                                                     } else {
@@ -3614,6 +3821,10 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
                                     .map => try self.primMap(),
                                     .filter => try self.primFilter(),
                                     .println => try self.primPrintln(),
+                                    .str => try self.primStr(),
+                                    .str_cat => try self.primStrCat(),
+                                    .str_len => try self.primStrLen(),
+                                    .str_eq => try self.primStrEq(),
                                     else => {},
                                 }
                             }
