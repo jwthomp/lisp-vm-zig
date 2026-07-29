@@ -597,6 +597,7 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
         try vm._registerBuiltin("str-cat", .str_cat);
         try vm._registerBuiltin("str-len", .str_len);
         try vm._registerBuiltin("str=?", .str_eq);
+        try vm._registerBuiltin("substr", .substr);
 
         return vm;
     }
@@ -1331,6 +1332,73 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
         else
             false;
         result.* = LispObject.numberObj(if (eq) 1 else 0);
+        self.push(result);
+    }
+
+    /// (substr s start [end]) — extract substring from start to end (or end of string)
+    pub fn primSubstr(self: *Vm) !void {
+        const count = self.stack.items.len;
+        if (count < 2) {
+            const obj = try self.allocator.create(LispObject);
+            self.gcRegister(obj);
+            obj.* = LispObject.errorObj("substr: need >=2 args");
+            self.push(obj);
+            return;
+        }
+        
+        // Pop and reverse args so args[0] = string, args[1] = start, args[2] = end
+        var args: [16]*LispObject = undefined;
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            args[count - 1 - i] = self.pop() orelse return error.StackUnderflow;
+        }
+
+        const strObj = args[0];
+        const startObj = args[1];
+
+        var start: usize = 0;
+        var end: usize = 0;
+
+        if (strObj.type != .string) {
+            const obj = try self.allocator.create(LispObject);
+            self.gcRegister(obj);
+            obj.* = LispObject.errorObj("substr: first arg must be string");
+            self.push(obj);
+            return;
+        }
+        
+        const str = strObj.value.string;
+
+        if (startObj.type == .number) {
+            start = if (startObj.value.number < 0) 0 else @intCast(startObj.value.number);
+            if (start > str.len) start = str.len;
+
+            if (count >= 3 and args[2].type == .number) {
+                end = @intCast(args[2].value.number);
+                if (end > str.len) end = str.len;
+            } else {
+                end = str.len;
+            }
+        } else {
+            const obj = try self.allocator.create(LispObject);
+            self.gcRegister(obj);
+            obj.* = LispObject.errorObj("substr: start must be number");
+            self.push(obj);
+            return;
+        }
+
+        if (start > end) {
+            start = end;
+        }
+
+        const len = if (end > start) end - start else 0;
+        const copy = try self.allocator.alloc(u8, len);
+        if (len > 0) {
+            @memcpy(copy, str[start..end]);
+        }
+        const result = try self.allocator.create(LispObject);
+        self.gcRegister(result);
+        result.* = LispObject.stringObj(copy);
         self.push(result);
     }
 
@@ -2312,6 +2380,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                 .str_cat => { _ = self.primStrCat() catch {}; },
                 .str_len => { _ = self.primStrLen() catch {}; },
                 .str_eq => { _ = self.primStrEq() catch {}; },
+                .substr => { _ = self.primSubstr() catch {}; },
             }
             return self.pop() orelse {
                 const obj = try self.allocator.create(LispObject);
@@ -2412,6 +2481,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                             .str_cat => { _ = self.primStrCat() catch {}; },
                             .str_len => { _ = self.primStrLen() catch {}; },
                             .str_eq => { _ = self.primStrEq() catch {}; },
+                            .substr => { _ = self.primSubstr() catch {}; },
                         }
                         return self.pop() orelse {
                             const obj = try self.allocator.create(LispObject);
@@ -3049,6 +3119,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                             .str_cat => try self.primStrCat(),
                             .str_len => try self.primStrLen(),
                             .str_eq => try self.primStrEq(),
+                            .substr => try self.primSubstr(),
                         }
                         return self.pop() orelse {
                             const obj = try self.allocator.create(LispObject);
@@ -3308,6 +3379,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                                     .str_cat => try self.primStrCat(),
                                     .str_len => try self.primStrLen(),
                                     .str_eq => try self.primStrEq(),
+                                    .substr => try self.primSubstr(),
                                     else => {},
                                 }
                             }
@@ -3486,6 +3558,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                                                             .str_cat => try self.primStrCat(),
                                                             .str_len => try self.primStrLen(),
                                                             .str_eq => try self.primStrEq(),
+                                                            .substr => try self.primSubstr(),
                                                             else => {},
                                                         }
                                                     }
@@ -3638,6 +3711,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                                                             .str_cat => try self.primStrCat(),
                                                             .str_len => try self.primStrLen(),
                                                             .str_eq => try self.primStrEq(),
+                                                            .substr => try self.primSubstr(),
                                                             else => {},
                                                         }
                                                     } else {
@@ -3825,6 +3899,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                                     .str_cat => try self.primStrCat(),
                                     .str_len => try self.primStrLen(),
                                     .str_eq => try self.primStrEq(),
+                                    .substr => try self.primSubstr(),
                                     else => {},
                                 }
                             }

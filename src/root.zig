@@ -5755,3 +5755,74 @@ test "bytecode — type-of string" {
     try std.testing.expectEqual(ObjType.string, result2.type);
     try std.testing.expect(std.mem.eql(u8, result2.value.string, "number"));
 }
+
+test "bytecode — substr" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = try Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    var bc = try Bytecode.init(alloc);
+    defer bc.deinit();
+
+    // (substr "hello world" 0 5) → "hello"
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("substr") },
+        Expr{ .string = "hello world" },
+        Expr{ .number = 0 },
+        Expr{ .number = 5 },
+    }) }, &env, &vm);
+    var result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(ObjType.string, result.type);
+    try std.testing.expect(std.mem.eql(u8, result.value.string, "hello"));
+
+    // (substr "hello" 2 4) → "ll"
+    bc.clear();
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("substr") },
+        Expr{ .string = "hello" },
+        Expr{ .number = 2 },
+        Expr{ .number = 4 },
+    }) }, &env, &vm);
+    result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(ObjType.string, result.type);
+    try std.testing.expect(std.mem.eql(u8, result.value.string, "ll"));
+
+    // (substr "hello" 0) → "hello" (end defaults to string end)
+    bc.clear();
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("substr") },
+        Expr{ .string = "hello" },
+        Expr{ .number = 0 },
+    }) }, &env, &vm);
+    result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(ObjType.string, result.type);
+    try std.testing.expect(std.mem.eql(u8, result.value.string, "hello"));
+
+    // (substr "hello" 2) → "llo"
+    bc.clear();
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = try symtab.getOrPut("substr") },
+        Expr{ .string = "hello" },
+        Expr{ .number = 2 },
+    }) }, &env, &vm);
+    result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(ObjType.string, result.type);
+    try std.testing.expect(std.mem.eql(u8, result.value.string, "llo"));
+
+    // (substr "hello" 3 3) → "" (empty, start == end)
+    bc.clear();
+    try bc.compileExpr(Expr{ .list = try alloc.dupe(Expr, &[4]Expr{
+        Expr{ .symbol = try symtab.getOrPut("substr") },
+        Expr{ .string = "hello" },
+        Expr{ .number = 3 },
+        Expr{ .number = 3 },
+    }) }, &env, &vm);
+    result = try vm.executeBytecode(&bc, &env);
+    try std.testing.expectEqual(ObjType.string, result.type);
+    try std.testing.expect(std.mem.eql(u8, result.value.string, ""));
+}

@@ -402,7 +402,7 @@ pub const BuiltinKind = enum {
     println, load, import,
     // Predicates
     equal, even, odd, positive, negative, type_of,
-    str, str_cat, str_len, str_eq,
+    str, str_cat, str_len, str_eq, substr,
 };
 
 pub const ConsCell = struct {
