@@ -1157,6 +1157,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
             .nil => true,
             .number => a.value.number == b.value.number,
             .symbol => std.mem.eql(u8, a.value.symbol.name, b.value.symbol.name),
+            .string => std.mem.eql(u8, a.value.string, b.value.string),
             .cons => self._equal(a.value.cons.car, b.value.cons.car) and
                      self._equal(a.value.cons.cdr, b.value.cons.cdr),
             .builtin => std.mem.eql(u8, a.value.builtin, b.value.builtin),
@@ -1558,7 +1559,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                 switch (x.type) {
                     .number => if (car.value.number == x.value.number) break,
                     .nil => break,
-                    .symbol => if (std.mem.eql(u8, car.value.symbol.name[0 .. car.value.symbol.name.len - 1], x.value.symbol.name[0 .. x.value.symbol.name.len - 1])) break,
+                    .symbol => if (std.mem.eql(u8, car.value.symbol.name, x.value.symbol.name)) break,
                     else => {},
                 }
             }
@@ -1591,7 +1592,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                     switch (key.type) {
                         .number => matched = pair_key.value.number == key.value.number,
                         .nil => matched = true,
-                        .symbol => matched = std.mem.eql(u8, pair_key.value.symbol.name[0 .. pair_key.value.symbol.name.len - 1], key.value.symbol.name[0 .. key.value.symbol.name.len - 1]),
+                        .symbol => matched = std.mem.eql(u8, pair_key.value.symbol.name, key.value.symbol.name),
                         else => {},
                     }
                     if (matched) {
