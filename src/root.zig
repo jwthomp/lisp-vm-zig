@@ -873,7 +873,7 @@ test "def — bind value in root env" {
     });
     defer alloc.free(items);
 
-    const result = try vm.evalDef(items);
+    const result = try vm.eval(Expr{ .list = items }, &env);
     try std.testing.expectEqual(@as(i64, 42), result.value.number);
     alloc.destroy(result);
 }

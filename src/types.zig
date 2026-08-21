@@ -403,6 +403,8 @@ pub const BuiltinKind = enum {
     // Predicates
     equal, even, odd, positive, negative, type_of,
     str, str_cat, str_len, str_eq, substr,
+    // IO
+    read_line, writeln,
 };
 
 pub const ConsCell = struct {

@@ -2,6 +2,8 @@
 // Token/Lexer/etc. are imported as needed
 
 const std = @import("std");
+const posix = std.posix;
+const os = std.os;
 const types = @import("types.zig");
 
 // Type aliases from types.zig (only for types used in bytecode/vm methods)
@@ -261,8 +263,8 @@ pub fn emitConstRef(self: *Bytecode, sym: *Symbol) !u32 {
                 if (std.mem.eql(u8, clean, "nil")) {
                     try self.emitNil();
                 } else {
-                    // Regular symbol lookup — add to constants
-                    try self.emitSymbol(try vm._addConstantSymbol(sym));
+                    // Regular symbol lookup — add to bytecode constants
+                    try self.emitSymbol(try self.emitConstRef(sym));
                 }
             },
             .string => |s| {
@@ -598,6 +600,9 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
         try vm._registerBuiltin("str-len", .str_len);
         try vm._registerBuiltin("str=?", .str_eq);
         try vm._registerBuiltin("substr", .substr);
+        // IO
+        try vm._registerBuiltin("read-line", .read_line);
+        try vm._registerBuiltin("writeln", .writeln);
 
         return vm;
     }
@@ -745,15 +750,6 @@ pub fn init(allocator: Allocator, env: *Environment) !Vm {
     }
 
     /// Add a Symbol to the bytecode constant pool and return its index
-    pub fn _addConstantSymbol(self: *Vm, sym: *Symbol) !u32 {
-        const idx = @as(u32, @intCast(self.bytecode_constants.items.len));
-        const obj = try self.allocator.create(LispObject);
-        obj.* = LispObject.symbolObj(sym);
-        self.gcRegister(obj);
-        self.bytecode_constants.appendAssumeCapacity(obj);
-        return idx;
-    }
-
 fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
         const copy = try self.allocator.alloc(u8, s.len);
         @memcpy(copy, s);
@@ -1848,6 +1844,55 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
         self.push(nil_obj);
     }
 
+    /// (writeln arg...) — write args space-separated to stdout, then a newline.
+    pub fn primWriteln(self: *Vm) !void {
+        var items = try self.allocator.alloc(*LispObject, self.stack.items.len);
+        defer self.allocator.free(items);
+        var i: usize = 0;
+        while (i < self.stack.items.len) : (i += 1) {
+            items[i] = self.stack.items[i];
+        }
+        self.stack.clearRetainingCapacity();
+
+        var first = true;
+        i = 0;
+        while (i < items.len) : (i += 1) {
+            var buf: [512]u8 = undefined;
+            var pos: usize = 0;
+            try self._formatToString(&buf, &pos, items[i]);
+            if (!first) {
+                _ = os.linux.write(posix.STDOUT_FILENO, " ".ptr, 1);
+            }
+            _ = os.linux.write(posix.STDOUT_FILENO, buf[0..pos].ptr, pos);
+            first = false;
+        }
+        _ = os.linux.write(posix.STDOUT_FILENO, "\n".ptr, 1);
+
+        const nil_obj = try self.allocator.create(LispObject);
+        self.gcRegister(nil_obj);
+        nil_obj.* = LispObject.nilObj();
+        self.push(nil_obj);
+    }
+
+    /// (read-line) — read a line from stdin, return it as a string.
+    pub fn primReadLine(self: *Vm) !void {
+        var line = std.ArrayList(u8).initCapacity(self.allocator, 64) catch return error.OutOfMemory;
+        errdefer line.deinit(self.allocator);
+        var ch: [1]u8 = .{0};
+        while (true) {
+            const n = posix.read(posix.STDIN_FILENO, &ch) catch break;
+            if (n == 0) break;
+            if (ch[0] == '\n') break;
+            try line.append(self.allocator, ch[0]);
+        }
+
+        const copy = try self.allocator.dupe(u8, line.items);
+        const obj = try self.allocator.create(LispObject);
+        self.gcRegister(obj);
+        obj.* = LispObject.stringObj(copy);
+        self.push(obj);
+    }
+
     /// Read an entire file into a heap-allocated buffer.
     /// Uses std.Io which works in both test and non-test modes.
     fn readFile(self: *Vm, path: []const u8) ![]u8 {
@@ -2129,39 +2174,6 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
         };
     }
 
-    /// (def name value) — bind in root env, return value.
-    pub fn evalDef(self: *Vm, items: []Expr) !*LispObject {
-        if (items.len < 3) return error.DefRequiresTwoArgs;
-        const name: []const u8 = switch (items[1]) {
-            .symbol => |sym| sym.name,
-            else => return error.DefInvalidName,
-        };
-        const val = switch (items[2]) {
-            .number => |n| blk: {
-                const obj = try self.allocator.create(LispObject);
-                self.gcRegister(obj);
-                obj.* = LispObject.numberObj(n);
-                break :blk obj;
-            },
-            .nil => blk: {
-                const obj = try self.allocator.create(LispObject);
-                self.gcRegister(obj);
-                obj.* = LispObject.nilObj();
-                break :blk obj;
-            },
-            .string => |s| blk: {
-                const obj = try self.allocator.create(LispObject);
-                self.gcRegister(obj);
-                const duped = try self.allocator.dupe(u8, s);
-                obj.* = LispObject.stringObj(duped);
-                break :blk obj;
-            },
-            else => return error.DefUnsupportedValue,
-        };
-        try self.rootEnv.bind(name, val);
-        return val;
-    }
-
     /// Build a ConsCell chain from an Expr list, bottom-up.
     fn _buildConsList(self: *Vm, ast: []Expr) !*LispObject {
         if (ast.len == 0) {
@@ -2367,6 +2379,8 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                 .map => { _ = self.primMap() catch {}; },
                 .filter => { _ = self.primFilter() catch {}; },
                 .println => { _ = self.primPrintln() catch {}; },
+                .read_line => { _ = self.primReadLine() catch {}; },
+                .writeln => { _ = self.primWriteln() catch {}; },
                 .load => { _ = self._load(items) catch {}; },
                 .import => { _ = self.primImport() catch {}; },
                 // Predicate builtins
@@ -2468,6 +2482,8 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                             .map => { _ = self.primMap() catch {}; },
                             .filter => { _ = self.primFilter() catch {}; },
                             .println => { _ = self.primPrintln() catch {}; },
+                            .read_line => { _ = self.primReadLine() catch {}; },
+                            .writeln => { _ = self.primWriteln() catch {}; },
                             .load => { _ = self._load(items) catch {}; },
                             .import => { _ = self.primImport() catch {}; },
                             // Predicate builtins
@@ -3005,7 +3021,16 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                     const isDefmacro = std.mem.eql(u8, clean, "defmacro");
                     const isDefpackage = std.mem.eql(u8, clean, "defpackage");
 
-                    if (isDef) return try self.evalDef(items);
+                    if (isDef) {
+                        if (items.len < 3) return error.DefRequiresTwoArgs;
+                        const name: []const u8 = switch (items[1]) {
+                            .symbol => |sym| sym.name,
+                            else => return error.DefInvalidName,
+                        };
+                        const val = try self.eval(items[2], env);
+                        try self.rootEnv.bind(name, val);
+                        return val;
+                    }
                     if (isFn) return try self.evalFn(items, env);
                     if (isDefn) return try self.evalDefn(items, env);
                     if (isDefpackage) return try self.evalDefpackage(items);
@@ -3106,6 +3131,8 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                                 .map => try self.primMap(),
                                 .filter => try self.primFilter(),
                                 .println => try self.primPrintln(),
+                                .writeln => try self.primWriteln(),
+                                .read_line => try self.primReadLine(),
                                 .load => try self._load(items),
                                 .import => try self.primImport(),
                                 // Predicate builtins
@@ -3182,11 +3209,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                         (@as(u32, bc.ops.items[pc + 3]) << 24);
                     pc += 4;
                     // Push the constant value (symbol or builtin reference)
-                    // Look up in vm.bytecode_constants (used by compileExpr for symbol lookups)
-                    const symObj = if (idx < self.bytecode_constants.items.len)
-                        self.bytecode_constants.items[idx]
-                    else
-                        bc.getConstant(idx);
+                    const symObj = bc.getConstant(idx);
                     if (symObj == null) {
                         debugPrint("const_val: constant not found at idx {d}\n", .{idx});
                         const obj = try self.allocator.create(LispObject);
@@ -3375,6 +3398,8 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                                     .negative => try self.primNegative(),
                                     .type_of => try self.primTypeOf(),
                                     .println => try self.primPrintln(),
+                                    .writeln => try self.primWriteln(),
+                                    .read_line => try self.primReadLine(),
                                     .str => try self.primStr(),
                                     .str_cat => try self.primStrCat(),
                                     .str_len => try self.primStrLen(),
@@ -3453,12 +3478,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                                                 (@as(u32, bodyOps.items[bodyPc + 2]) << 16) |
                                                 (@as(u32, bodyOps.items[bodyPc + 3]) << 24);
                                             bodyPc += 4;
-                                            // Look up in bytecode_constants first (where compileExpr stores symbols),
-                                            // then bc.constants as fallback
-                                            const symObj = if (idx < self.bytecode_constants.items.len)
-                                                self.bytecode_constants.items[idx]
-                                            else
-                                                bc.getConstant(idx);
+                                             const symObj = bc.getConstant(idx);
                                             if (symObj) |so| {
                                                 const name = so.value.symbol.name[0..];
                                                 // Check if it's a builtin
@@ -3554,6 +3574,8 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                                                             .type_of => try self.primTypeOf(),
                                                             .filter => try self.primFilter(),
                                                             .println => try self.primPrintln(),
+                                                            .writeln => try self.primWriteln(),
+                                                            .read_line => try self.primReadLine(),
                                                             .str => try self.primStr(),
                                                             .str_cat => try self.primStrCat(),
                                                             .str_len => try self.primStrLen(),
@@ -3707,6 +3729,8 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                                                             .type_of => try self.primTypeOf(),
                                                             .filter => try self.primFilter(),
                                                             .println => try self.primPrintln(),
+                                                            .writeln => try self.primWriteln(),
+                                                            .read_line => try self.primReadLine(),
                                                             .str => try self.primStr(),
                                                             .str_cat => try self.primStrCat(),
                                                             .str_len => try self.primStrLen(),
@@ -3895,6 +3919,8 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                                     .map => try self.primMap(),
                                     .filter => try self.primFilter(),
                                     .println => try self.primPrintln(),
+                                    .writeln => try self.primWriteln(),
+                                    .read_line => try self.primReadLine(),
                                     .str => try self.primStr(),
                                     .str_cat => try self.primStrCat(),
                                     .str_len => try self.primStrLen(),
