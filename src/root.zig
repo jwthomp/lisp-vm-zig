@@ -2735,28 +2735,30 @@ fn redrawHistoryLine(line_content: []const u8) void {
 }
 
 pub fn replLoop(vm: *Vm, env: *Environment) void {
-    // ---- Terminal raw/cbreak mode setup ----
-    // tcgetattr returns error{NotATerminal,...} if stdin is not a tty.
-    const termios_result = posix.tcgetattr(posix.STDIN_FILENO) catch null;
-    if (termios_result) |saved_termios| {
-        defer posix.tcsetattr(posix.STDIN_FILENO, .NOW, saved_termios) catch {};
-
-        var raw_termios = saved_termios;
+    // ---- Terminal cbreak mode setup ----
+    // cbreak (no ICANON/ECHO) enables arrow-key history navigation. When it
+    // can't be enabled (stdin is not a tty, or no permission), fall back to
+    // canonical line reading: whole lines arrive on Enter and the tty driver
+    // (or pipe) echoes itself, so the manual echo below is skipped.
+    var cbreak = false;
+    const saved_termios: ?posix.termios = posix.tcgetattr(posix.STDIN_FILENO) catch null;
+    if (saved_termios) |term| {
+        var raw_termios = term;
         raw_termios.lflag.ICANON = false;
         raw_termios.lflag.ECHO = false;
         raw_termios.cc[5] = 0; // VTIME = 0
         raw_termios.cc[6] = 1; // VMIN = 1
-        if (posix.tcsetattr(posix.STDIN_FILENO, .NOW, raw_termios) catch null == null) {
-            // Success — continue
-        } else {
-            debugPrint("Warning: could not set terminal to cbreak mode\n", .{});
-            return; // Can't navigate without cbreak mode
+        if (posix.tcsetattr(posix.STDIN_FILENO, .NOW, raw_termios) catch null != null) {
+            cbreak = true;
         }
-    } else {
-        debugPrint("Warning: stdin is not a tty\n", .{});
-        return; // Can't navigate without cbreak mode
     }
-    // ---- End terminal raw mode setup ----
+    // Restore original termios when the REPL exits (function-scoped defer).
+    defer {
+        if (saved_termios) |t| {
+            if (cbreak) posix.tcsetattr(posix.STDIN_FILENO, .NOW, t) catch {};
+        }
+    }
+    // ---- End terminal cbreak mode setup ----
 
     debugPrint("lisp-vm {s}\nType (exit) or (quit) to leave.\n", .{version});
 
@@ -2813,7 +2815,9 @@ pub fn replLoop(vm: *Vm, env: *Environment) void {
                 }
                 if (ch == '\n' or ch == '\r' or ch == 0x04) break;
                 // Echo printable characters so user sees what they type.
-                if (ch >= 0x20 and ch < 0x7F) stdoutWrite(&[_]u8{ch});
+                // Only in cbreak mode — in canonical fallback the tty driver
+                // already echoes input.
+                if (cbreak and ch >= 0x20 and ch < 0x7F) stdoutWrite(&[_]u8{ch});
                 // Append character to input line (grows buffer automatically).
                 line_buf.append(std.heap.page_allocator, ch) catch unreachable;
             }
