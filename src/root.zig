@@ -6109,3 +6109,27 @@ test "mud world — rooms/items/lock" {
     _ = try evalLispSource(&vm, &env, "(dispatch \"walk down\")");
     try std.testing.expectEqualStrings("crypt", (try evalLispSource(&vm, &env, "(str (player_pos player))")).value.string);
 }
+
+test "mud mudeus — bootstrap" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = try Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // Import with autostart disabled (main() would block on read-line)
+    _ = try evalLispSource(&vm, &env, "(def *no-autostart* 1)");
+    _ = try evalLispSource(&vm, &env, "(import mud/mudeus.lsp)");
+
+    // start-game creates the player at the start room with full hp
+    _ = try evalLispSource(&vm, &env, "(start-game \"hero\")");
+    try std.testing.expectEqualStrings("gate", (try evalLispSource(&vm, &env, "(str (player_pos player))")).value.string);
+    try std.testing.expectEqual(@as(i64, 100), (try evalLispSource(&vm, &env, "(player_hp player)")).value.number);
+
+    // dispatch "quit" → 'quit sentinel (loop-exit contract)
+    const quit = try evalLispSource(&vm, &env, "(dispatch \"quit\")");
+    try std.testing.expect(quit.type == .symbol);
+    try std.testing.expectEqualStrings("quit", quit.value.symbol.name);
+}
