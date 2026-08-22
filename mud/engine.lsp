@@ -57,16 +57,17 @@
         (exit_list (room_exits room))
         "]")))
 
-(defn make_player (name hp pos inv)
-  (cons 'player (cons name (cons hp (cons pos (cons inv nil))))))
+(defn make_player (name hp pos inv equip)
+  (cons 'player (cons name (cons hp (cons pos (cons inv (cons equip nil)))))))
 
 (defn player_name (p) (car (cdr p)))
 (defn player_hp (p) (car (cdr (cdr p))))
 (defn player_pos (p) (car (cdr (cdr (cdr p)))))
 (defn player_inv (p) (car (cdr (cdr (cdr (cdr p))))))
+(defn player_equip (p) (car (cdr (cdr (cdr (cdr (cdr p)))))))
 
 (defn set_player_pos (p pos)
-  (make_player (player_name p) (player_hp p) pos (player_inv p)))
+  (make_player (player_name p) (player_hp p) pos (player_inv p) (player_equip p)))
 
 ;; (move dir) — validate the exit from the player's current room,
 ;; update the global player position, return the new room record (nil if no exit).

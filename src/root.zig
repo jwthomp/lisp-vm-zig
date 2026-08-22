@@ -956,6 +956,38 @@ test "eval — nested + call" {
     alloc.free(outer);
 }
 
+test "lexer — negative number literal" {
+    var lexer = Lexer.init("(-5)");
+    try std.testing.expectEqual(.left_paren, lexer.nextToken());
+    try std.testing.expectEqual(.number, lexer.nextToken());
+    try std.testing.expectEqualStrings("-5", lexer.current_text);
+    try std.testing.expectEqual(.right_paren, lexer.nextToken());
+}
+
+test "eval — negative number literal in expression" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    _ = try symtab.getOrPut("+");
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = try Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    const plusSym = try symtab.getOrPut("+");
+    const items: []Expr = try alloc.dupe(Expr, &[3]Expr{
+        Expr{ .symbol = plusSym },
+        Expr{ .number = 1 },
+        Expr{ .number = -5 },
+    });
+
+    const result = try vm.eval(Expr{ .list = items }, &env);
+    try std.testing.expectEqual(@as(i64, -4), result.value.number);
+    alloc.destroy(result);
+    alloc.free(items);
+}
+
 // ============================================================
 // Main
 // ============================================================
@@ -5896,7 +5928,7 @@ test "mud engine — get_room/move/describe_room" {
     _ = try evalLispSource(&vm, &env,
         "(def rooms (cons 'gate (cons (make_room 'gate \"South Gate\" '(north square)) nil)))" ++
         "(def rooms (cons 'square (cons (make_room 'square \"Central Square\" '(south gate)) rooms)))" ++
-        "(def player (make_player \"Ada\" 10 'gate nil))");
+        "(def player (make_player \"Ada\" 10 'gate nil nil))");
 
     // get_room returns the room record
     const room = try evalLispSource(&vm, &env, "(get_room 'gate)");
@@ -5918,4 +5950,61 @@ test "mud engine — get_room/move/describe_room" {
     // describe_room → string
     const desc = try evalLispSource(&vm, &env, "(describe_room (get_room 'square))");
     try std.testing.expect(desc.type == .string);
+}
+
+test "mud state — create/inventory/equip/damage/save-load" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = try Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // (import mud/state.lsp) — state.lsp imports engine.lsp itself
+    const impItems: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("import") },
+        Expr{ .symbol = try symtab.getOrPut("mud/state.lsp") },
+    });
+    defer alloc.free(impItems);
+    _ = try vm.eval(Expr{ .list = impItems }, &env);
+
+    // create_player initializes hp/pos/inv/equip
+    _ = try evalLispSource(&vm, &env, "(def player (create_player 'hero))");
+    const hp = try evalLispSource(&vm, &env, "(player_hp player)");
+    try std.testing.expectEqual(@as(i64, 100), hp.value.number);
+    const pos = try evalLispSource(&vm, &env, "(player_pos player)");
+    try std.testing.expectEqualStrings("gate", pos.value.symbol.name);
+    try std.testing.expect((try evalLispSource(&vm, &env, "(player_inv player)")).type == .nil);
+
+    // inventory: add / has / drop
+    _ = try evalLispSource(&vm, &env, "(add_item 'sword)");
+    _ = try evalLispSource(&vm, &env, "(add_item 'potion)");
+    try std.testing.expectEqual(@as(i64, 1), (try evalLispSource(&vm, &env, "(has_item 'sword)")).value.number);
+    try std.testing.expectEqual(@as(i64, 0), (try evalLispSource(&vm, &env, "(has_item 'axe)")).value.number);
+    _ = try evalLispSource(&vm, &env, "(drop_item 'sword)");
+    try std.testing.expectEqual(@as(i64, 0), (try evalLispSource(&vm, &env, "(has_item 'sword)")).value.number);
+    _ = try evalLispSource(&vm, &env, "(add_item 'sword)");
+
+    // equip moves item inv → equip, unequip reverses
+    try std.testing.expectEqual(@as(i64, 1), (try evalLispSource(&vm, &env, "(equip 'sword)")).value.number);
+    try std.testing.expectEqual(@as(i64, 0), (try evalLispSource(&vm, &env, "(has_item 'sword)")).value.number);
+    try std.testing.expectEqual(@as(i64, 1), (try evalLispSource(&vm, &env, "(length (player_equip player))")).value.number);
+    try std.testing.expectEqual(@as(i64, 0), (try evalLispSource(&vm, &env, "(equip 'lantern)")).value.number);
+    try std.testing.expectEqual(@as(i64, 1), (try evalLispSource(&vm, &env, "(unequip 'sword)")).value.number);
+    try std.testing.expectEqual(@as(i64, 1), (try evalLispSource(&vm, &env, "(has_item 'sword)")).value.number);
+
+    // apply_damage floors at 0
+    try std.testing.expectEqual(@as(i64, 70), (try evalLispSource(&vm, &env, "(apply_damage 30)")).value.number);
+    try std.testing.expectEqual(@as(i64, 0), (try evalLispSource(&vm, &env, "(apply_damage 999)")).value.number);
+
+    // save_state / load_state round-trip
+    _ = try evalLispSource(&vm, &env, "(def saved (save_state))");
+    _ = try evalLispSource(&vm, &env, "(def player (create_player 'ghost))");
+    try std.testing.expectEqual(@as(i64, 100), (try evalLispSource(&vm, &env, "(player_hp player)")).value.number);
+    _ = try evalLispSource(&vm, &env, "(load_state saved)");
+    try std.testing.expectEqual(@as(i64, 0), (try evalLispSource(&vm, &env, "(player_hp player)")).value.number);
+    const name = try evalLispSource(&vm, &env, "(player_name player)");
+    try std.testing.expectEqualStrings("hero", name.value.symbol.name);
 }

@@ -129,6 +129,15 @@ pub const Lexer = struct {
             self.pos += 1;
             return .str_lit;
         }
+        if ((c == '-' or c == '+') and self.pos + 1 < self.input.len and std.ascii.isDigit(self.input[self.pos + 1])) {
+            const num_start = self.pos;
+            self.pos += 1;
+            while (self.pos < self.input.len and std.ascii.isDigit(self.input[self.pos])) {
+                self.pos += 1;
+            }
+            self.current_text = self.input[num_start..self.pos];
+            return .number;
+        }
         if (std.ascii.isAlphabetic(c) or c == '+' or c == '-' or c == '*' or c == '/' or
             c == '=' or c == '<' or c == '>' or c == '_' or c == '!' or c == '?' or c == '$' or
             c == '.')
