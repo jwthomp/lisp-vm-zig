@@ -50,10 +50,22 @@
             (let ((room (move dir)))
               (if (null? room)
                   (println "You can't go that way.")
-                  (println (describe_room room))))))))
+                  (do
+                    (println (describe_room room))
+                    (enter_effects room))))))))
 
 (defn cmd-look ()
   (println (describe_room (get_room (player_pos player)))))
+
+;; (enter_effects room) — notice an item lying in the room.
+;; `room_items` is a global set by world.lsp; nil when no world is loaded.
+(defn enter_effects (room)
+  (if (null? room)
+      nil
+      (let ((rname (room_name room)))
+        (if (null? (member rname room_items))
+            nil
+            (println (str-cat "You see a " (str (car (cdr (member rname room_items)))) " here."))))))
 
 ;; (inv-text l) → comma-joined inventory string; "nothing" when empty
 (defn inv-text (l)
@@ -65,15 +77,36 @@
             (str-cat (str-cat (str (car l)) ", ") (inv-text rest))))))
 
 (defn cmd-inv ()
-  (println "You are carrying:" (inv-text (player_inv player))))
+  (println (str-cat "You are carrying: " (inv-text (player_inv player)))))
+
+;; ponytail: hard-coded item table — add new items here and in world.lsp
+(defn item-symbol (s)
+  (if (str=? s "key") 'key
+      (if (str=? s "lantern") 'lantern
+          (if (str=? s "amulet") 'amulet
+              (if (str=? s "potion") 'potion
+                  (if (str=? s "sword") 'sword nil))))))
+
+;; (cmd-take arg) / (cmd-use arg) — arg is raw text; take_cmd/use_cmd live in world.lsp
+(defn cmd-take (arg)
+  (if (null? arg)
+      (println "Take what?")
+      (take_cmd (item-symbol arg))))
+
+(defn cmd-use (arg)
+  (if (null? arg)
+      (println "Use what?")
+      (use_cmd (item-symbol arg))))
 
 (defn cmd-help ()
   (println "Commands:")
-  (println "  walk <dir> - move (north, south, east, west, up, down)")
-  (println "  look       - describe the current room")
-  (println "  inv        - show your inventory")
-  (println "  help       - show this help")
-  (println "  quit       - leave the game"))
+  (println "  walk <dir>  - move (north, south, east, west, up, down)")
+  (println "  look        - describe the current room")
+  (println "  inv         - show your inventory")
+  (println "  take <item> - pick up an item in the current room")
+  (println "  use <item>  - use an item from your inventory")
+  (println "  help        - show this help")
+  (println "  quit        - leave the game"))
 
 ;; quit → clean shutdown: prints farewell and returns the 'quit sentinel
 (defn cmd-quit ()
@@ -89,8 +122,12 @@
             (cmd-look)
             (if (str=? verb "inv")
                 (cmd-inv)
-                (if (str=? verb "help")
-                    (cmd-help)
-                    (if (str=? verb "quit")
-                        (cmd-quit)
-                        (println "Unknown command. Try: help"))))))))
+                (if (str=? verb "take")
+                    (cmd-take (parse-arg line))
+                    (if (str=? verb "use")
+                        (cmd-use (parse-arg line))
+                        (if (str=? verb "help")
+                            (cmd-help)
+                            (if (str=? verb "quit")
+                                (cmd-quit)
+                                (println "Unknown command. Try: help")))))))))

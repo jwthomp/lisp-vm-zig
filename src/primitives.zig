@@ -1377,7 +1377,8 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
         self.gcRegister(nil_obj);
         nil_obj.* = LispObject.nilObj();
 
-        // Collect all list heads
+        // Collect all list heads, then clear the stack (consume our args,
+        // matching the convention that each primitive leaves one result).
         var heads = try self.allocator.alloc(*LispObject, count);
         defer self.allocator.free(heads);
         var i: usize = 0;
@@ -1389,6 +1390,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
             }
             heads[i] = obj;
         }
+        self.stack.clearRetainingCapacity();
         if (!has_any_list) return error.TypeError;
 
         // Build result by copying elements from all lists

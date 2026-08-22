@@ -6058,3 +6058,54 @@ test "mud cmds — parse/dispatch" {
     try std.testing.expect(quit.type == .symbol);
     try std.testing.expectEqualStrings("quit", quit.value.symbol.name);
 }
+
+test "mud world — rooms/items/lock" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = try Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // (import mud/world.lsp) — world.lsp imports engine/state/cmds itself
+    const impItems: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("import") },
+        Expr{ .symbol = try symtab.getOrPut("mud/world.lsp") },
+    });
+    defer alloc.free(impItems);
+    _ = try vm.eval(Expr{ .list = impItems }, &env);
+
+    _ = try evalLispSource(&vm, &env, "(def player (create_player 'hero))");
+
+    // gate → square
+    _ = try evalLispSource(&vm, &env, "(dispatch \"walk north\")");
+    try std.testing.expectEqualStrings("square", (try evalLispSource(&vm, &env, "(str (player_pos player))")).value.string);
+
+    // tower is locked without the key
+    _ = try evalLispSource(&vm, &env, "(dispatch \"walk north\")");
+    try std.testing.expectEqualStrings("square", (try evalLispSource(&vm, &env, "(str (player_pos player))")).value.string);
+
+    // take key, enter tower
+    _ = try evalLispSource(&vm, &env, "(dispatch \"take key\")");
+    try std.testing.expectEqual(@as(i64, 1), (try evalLispSource(&vm, &env, "(has_item 'key)")).value.number);
+    _ = try evalLispSource(&vm, &env, "(dispatch \"walk north\")");
+    try std.testing.expectEqualStrings("tower", (try evalLispSource(&vm, &env, "(str (player_pos player))")).value.string);
+
+    // take potion, take damage, use potion
+    _ = try evalLispSource(&vm, &env, "(dispatch \"take potion\")");
+    try std.testing.expectEqual(@as(i64, 1), (try evalLispSource(&vm, &env, "(has_item 'potion)")).value.number);
+    _ = try evalLispSource(&vm, &env, "(apply_damage 30)");
+    try std.testing.expectEqual(@as(i64, 70), (try evalLispSource(&vm, &env, "(player_hp player)")).value.number);
+    _ = try evalLispSource(&vm, &env, "(dispatch \"use potion\")");
+    try std.testing.expectEqual(@as(i64, 95), (try evalLispSource(&vm, &env, "(player_hp player)")).value.number);
+    try std.testing.expectEqual(@as(i64, 0), (try evalLispSource(&vm, &env, "(has_item 'potion)")).value.number);
+
+    // hidden passage: square → gate → crypt (down)
+    _ = try evalLispSource(&vm, &env, "(dispatch \"walk south\")");
+    _ = try evalLispSource(&vm, &env, "(dispatch \"walk south\")");
+    try std.testing.expectEqualStrings("gate", (try evalLispSource(&vm, &env, "(str (player_pos player))")).value.string);
+    _ = try evalLispSource(&vm, &env, "(dispatch \"walk down\")");
+    try std.testing.expectEqualStrings("crypt", (try evalLispSource(&vm, &env, "(str (player_pos player))")).value.string);
+}
