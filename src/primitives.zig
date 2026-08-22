@@ -1777,8 +1777,6 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
             debugPrint("{s}\n", .{buf[0..pos]}); 
         }
 
-        self.allocator.free(items);
-
         // Return nil
         const nil_obj = try self.allocator.create(LispObject);
         self.gcRegister(nil_obj);
@@ -3056,11 +3054,20 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                         return cr;
                     }
 
-                    // --- Primitives: push evaluated args, dispatch via O(1) table lookup ---
+                    // --- Primitives: evaluate args into a temp array, then push
+                    // all just before dispatch so stack-counting prims (substr/
+                    // str/append/println) see exactly this call's args, not
+                    // outer args left on the shared stack by nested calls ---
                     var ai: usize = 1;
+                    const nargs = items.len - 1;
+                    const evalArgs = try self.allocator.alloc(*LispObject, nargs);
+                    defer self.allocator.free(evalArgs);
                     while (ai < items.len) : (ai += 1) {
-                        const arg = try self.eval(items[ai], env);
-                        self.push(arg);
+                        evalArgs[ai - 1] = try self.eval(items[ai], env);
+                    }
+                    ai = 0;
+                    while (ai < nargs) : (ai += 1) {
+                        self.push(evalArgs[ai]);
                     }
 
                     // O(1) dispatch: hash map replaces 22+ string comparisons

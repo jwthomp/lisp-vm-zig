@@ -6008,3 +6008,53 @@ test "mud state — create/inventory/equip/damage/save-load" {
     const name = try evalLispSource(&vm, &env, "(player_name player)");
     try std.testing.expectEqualStrings("hero", name.value.symbol.name);
 }
+
+test "mud cmds — parse/dispatch" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = try Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // (import mud/cmds.lsp) — cmds.lsp imports engine.lsp + state.lsp itself
+    const impItems: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("import") },
+        Expr{ .symbol = try symtab.getOrPut("mud/cmds.lsp") },
+    });
+    defer alloc.free(impItems);
+    _ = try vm.eval(Expr{ .list = impItems }, &env);
+
+    // Two-room world + player at gate
+    _ = try evalLispSource(&vm, &env,
+        "(def rooms (cons 'gate (cons (make_room 'gate \"South Gate\" '(north square)) nil)))" ++
+        "(def rooms (cons 'square (cons (make_room 'square \"Central Square\" '(south gate)) rooms)))" ++
+        "(def player (create_player 'hero))");
+
+    // parse-verb / parse-arg
+    try std.testing.expectEqualStrings("walk", (try evalLispSource(&vm, &env, "(str (parse-verb \"walk north\"))")).value.string);
+    try std.testing.expectEqualStrings("north", (try evalLispSource(&vm, &env, "(parse-arg \"walk north\")")).value.string);
+    try std.testing.expect((try evalLispSource(&vm, &env, "(parse-arg \"walk\")")).type == .nil);
+
+    // dispatch "walk north" → player moves to square
+    _ = try evalLispSource(&vm, &env, "(dispatch \"walk north\")");
+    const pos = try evalLispSource(&vm, &env, "(player_pos player)");
+    try std.testing.expect(pos.type == .symbol);
+    try std.testing.expectEqualStrings("square", pos.value.symbol.name);
+
+    // dispatch "walk" (no arg) → prompt, position unchanged
+    _ = try evalLispSource(&vm, &env, "(dispatch \"walk\")");
+    const pos2 = try evalLispSource(&vm, &env, "(player_pos player)");
+    try std.testing.expectEqualStrings("square", pos2.value.symbol.name);
+
+    // dispatch "look" / "bogus" → side-effect only, nil result
+    try std.testing.expect((try evalLispSource(&vm, &env, "(dispatch \"look\")")).type == .nil);
+    try std.testing.expect((try evalLispSource(&vm, &env, "(dispatch \"bogus\")")).type == .nil);
+
+    // dispatch "quit" → 'quit sentinel for clean shutdown
+    const quit = try evalLispSource(&vm, &env, "(dispatch \"quit\")");
+    try std.testing.expect(quit.type == .symbol);
+    try std.testing.expectEqualStrings("quit", quit.value.symbol.name);
+}
