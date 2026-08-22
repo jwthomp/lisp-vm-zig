@@ -763,83 +763,24 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
 
     /// Add an Expr converted to a LispObject constant and return its index
     pub fn _addConstantExpr(self: *Vm, expr: Expr) !u32 {
-        const obj = try self.allocator.create(LispObject);
-        switch (expr) {
-            .nil => {
-                obj.* = LispObject.nilObj();
-            },
-            .number => |n| {
-                obj.* = LispObject.numberObj(n);
-            },
-            .symbol => |sym| {
-                obj.* = LispObject.symbolObj(sym);
-            },
-            .string => |s| {
-                const copy = try self.allocator.dupe(u8, s);
-                self.gcRegister(obj);
-                obj.* = LispObject.stringObj(copy);
-            },
-            .list => |items| {
-                // Convert AST list to a ConsCell chain, returning a LispObject of type .cons
-                if (items.len == 0) {
-                    obj.* = LispObject.nilObj();
-                } else {
-                    // Build from bottom (end of list) up
-                    var tail: *LispObject = obj;
-                    tail.* = LispObject.nilObj();
-                    var i: usize = items.len;
-                    while (i > 0) {
-                        i -= 1;
-                        const cell_obj = try self.allocator.create(LispObject);
-                        self.gcRegister(cell_obj);
-                        const cell = try self.allocator.create(ConsCell);
-
-                        const car_val: *LispObject = switch (items[i]) {
-                            .nil => blk: {
-                                const o = try self.allocator.create(LispObject);
-                                self.gcRegister(o);
-                                o.* = LispObject.nilObj();
-                                break :blk o;
-                            },
-                            .number => |n| blk: {
-                                const o = try self.allocator.create(LispObject);
-                                self.gcRegister(o);
-                                o.* = LispObject.numberObj(n);
-                                break :blk o;
-                            },
-                            .symbol => blk: {
-                                const o = try self.allocator.create(LispObject);
-                                self.gcRegister(o);
-                                o.* = LispObject.nilObj();
-                                break :blk o;
-                            },
-                            .list => blk: {
-                                const o = try self.allocator.create(LispObject);
-                                self.gcRegister(o);
-                                o.* = LispObject.nilObj();
-                                break :blk o;
-                            },
-                            .string => blk: {
-                                const o = try self.allocator.create(LispObject);
-                                self.gcRegister(o);
-                                o.* = LispObject.nilObj();
-                                break :blk o;
-                            },
-                        };
-
-                        cell.* = ConsCell.init(car_val, tail);
-                        cell_obj.* = LispObject{
-                            .type = .cons,
-                            .value = .{ .cons = cell },
-                            .next = tail,
-                            .marked = false,
-                        };
-                        tail = cell_obj;
-                    }
-                    obj.* = tail.*;
+        const obj = switch (expr) {
+            .list => |items| try self._buildConsList(items),
+            else => blk: {
+                const o = try self.allocator.create(LispObject);
+                self.gcRegister(o);
+                switch (expr) {
+                    .nil => o.* = LispObject.nilObj(),
+                    .number => |n| o.* = LispObject.numberObj(n),
+                    .symbol => |sym| o.* = LispObject.symbolObj(sym),
+                    .string => |s| {
+                        const copy = try self.allocator.dupe(u8, s);
+                        o.* = LispObject.stringObj(copy);
+                    },
+                    .list => o.* = LispObject.nilObj(),
                 }
+                break :blk o;
             },
-        }
+        };
         const idx = @as(u32, @intCast(self.bytecode_constants.items.len));
         self.bytecode_constants.appendAssumeCapacity(obj);
         return idx;
@@ -1978,8 +1919,13 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
         // Evaluate each top-level expression
         while (true) {
             const expr = parser.parseSExpr(0) catch break;
-            if (self.eval(expr, self.rootEnv)) |_| {} else |err| {
-                debugPrint("import error: {any}\n", .{err});
+            switch (expr) {
+                .nil => break,
+                else => |e| {
+                    if (self.eval(e, self.rootEnv)) |_| {} else |err| {
+                        debugPrint("import error: {any}\n", .{err});
+                    }
+                },
             }
         }
 
@@ -2068,19 +2014,13 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
 
         // Evaluate each top-level expression, return last result
         var result_obj: ?*LispObject = null;
-        errdefer {
-            if (result_obj) |obj| self.allocator.destroy(obj);
-        }
 
         while (true) {
             const expr = parser.parseSExpr(0) catch break;
             switch (expr) {
                 .nil => break,
                 else => |e| {
-                    const evaluated = try self.eval(e, self.rootEnv);
-                    // Destroy old result before replacing
-                    if (result_obj) |old| self.allocator.destroy(old);
-                    result_obj = evaluated;
+                    result_obj = try self.eval(e, self.rootEnv);
                 },
             }
         }
@@ -2206,16 +2146,14 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                     o.* = LispObject.numberObj(n);
                     break :blk o;
                 },
-                .symbol => blk: {
+                .symbol => |sym| blk: {
                     const o = try self.allocator.create(LispObject);
                     self.gcRegister(o);
-                    o.* = LispObject.nilObj();
+                    o.* = LispObject.symbolObj(sym);
                     break :blk o;
                 },
-                .list => blk: {
-                    const o = try self.allocator.create(LispObject);
-                    self.gcRegister(o);
-                    o.* = LispObject.nilObj();
+                .list => |inner| blk: {
+                    const o = try self._buildConsList(inner);
                     break :blk o;
                 },
                 .string => blk: {
@@ -2292,8 +2230,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
         // Evaluate all except last, discard
         var i: usize = 1;
         while (i < items.len - 1) : (i += 1) {
-            const res = try self._evalDoAtom(items[i], env);
-            self.allocator.destroy(res);
+            _ = try self._evalDoAtom(items[i], env);
         }
         // Return last value
         return self._evalDoAtom(items[items.len - 1], env);
@@ -2436,10 +2373,9 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                     var result: *LispObject = (self.allocator.create(LispObject) catch return error.OutOfMemory);
                     result.* = LispObject.nilObj();
                     var i: usize = 0;
-                    while (i < cl.body.len) : (i += 1) {
-                        if (i > 0) self.allocator.destroy(result);
-                        result = (self.eval(cl.body[i], childEnv) catch return error.OutOfMemory);
-                    }
+                                        while (i < cl.body.len) : (i += 1) {
+                                            result = (self.eval(cl.body[i], childEnv) catch return error.OutOfMemory);
+                                        }
                     return result;
                 },
                 .builtin => {
@@ -2523,7 +2459,6 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
     pub fn _evalIf(self: *Vm, items: []Expr, env: *Environment) !*LispObject {
         if (items.len < 3) return error.IfRequiresAtLeastTwoArgs;
         const testVal = try self._evalIfAtom(items[1], env);
-        defer self.allocator.destroy(testVal);
         const taken = testVal.type != .nil and !(testVal.type == .number and testVal.value.number == 0);
         if (taken) {
             if (items.len > 2) return self._evalIfAtom(items[2], env);
@@ -2550,7 +2485,6 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
         var i: usize = 1;
         while (i + 1 < items.len) {
             const testVal = try self._evalCondAtom(items[i], env);
-            defer self.allocator.destroy(testVal);
             if (testVal.type != .nil and !(testVal.type == .number and testVal.value.number == 0)) {
                 return self._evalCondAtom(items[i + 1], env);
             }
@@ -2619,8 +2553,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                 var i: usize = 0;
                 while (i < bodyExprs.len) : (i += 1) {
                     if (i + 1 < bodyExprs.len) {
-                        const tmp = try self.eval(bodyExprs[i], childEnv);
-                        self.allocator.destroy(tmp);
+                        _ = try self.eval(bodyExprs[i], childEnv);
                     } else {
                         result.* = (try self.eval(bodyExprs[i], childEnv)).*;
                     }
@@ -2718,7 +2651,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                     copy[i] = Expr{ .list = nested };
                 },
                 .string => |s| {
-                    copy[i] = Expr{ .string = s };
+                    copy[i] = Expr{ .string = try self.allocator.dupe(u8, s) };
                 },
             }
             i += 1;
@@ -2871,8 +2804,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
         result.* = LispObject.nilObj();
         var i: usize = 0;
         while (i < cl.body.len) : (i += 1) {
-            if (i > 0) self.allocator.destroy(result);
-            result = try self.eval(cl.body[i], childEnv);
+                        result = try self.eval(cl.body[i], childEnv);
         }
         
         return result;
@@ -2904,7 +2836,6 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
         while (i < cl.body.len) : (i += 1) {
             // Evaluate this body expression
             const obj = try self.eval(cl.body[i], env);
-            defer self.allocator.destroy(obj);
             result = try self._lispObjToExpr(obj);
         }
 
@@ -2975,7 +2906,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                 .string => |s| {
                     const obj = try self.allocator.create(LispObject);
                     self.gcRegister(obj);
-                    obj.* = LispObject.stringObj(s);
+                    obj.* = LispObject.stringObj(try self.allocator.dupe(u8, s));
                     return obj;
                 },
                 .symbol => |sym| {
@@ -3042,6 +2973,43 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
                     if (isQuote) return try self._evalQuote(items, env);
                     if (isLet) return try self._evalLet(items, env);
                     if (isDefmacro) return try self.evalDefmacro(items, env);
+                    if (std.mem.eql(u8, clean, "import")) {
+                        if (items.len < 2) return error.ImportRequiresArg;
+                        const argObj = blk: {
+                            switch (items[1]) {
+                                .symbol => |sym| {
+                                    var nm: []const u8 = sym.name[0..];
+                                    while (nm.len > 0 and nm[nm.len - 1] == 0) {
+                                        nm = nm[0 .. nm.len - 1];
+                                    }
+                                    const o = try self.allocator.create(LispObject);
+                                    self.gcRegister(o);
+                                    if (self.packageTable.contains(nm)) {
+                                        o.* = LispObject.nilObj();
+                                    } else {
+                                        o.* = LispObject.symbolObj(sym);
+                                    }
+                                    break :blk o;
+                                },
+                                else => break :blk try self.eval(items[1], env),
+                            }
+                        };
+                        self.push(argObj);
+                        try self.primImport();
+                        return self.pop() orelse blk: {
+                            const o = try self.allocator.create(LispObject);
+                            o.* = LispObject.nilObj();
+                            break :blk o;
+                        };
+                    }
+                    if (std.mem.eql(u8, clean, "load")) {
+                        try self._load(items);
+                        return self.pop() orelse blk: {
+                            const o = try self.allocator.create(LispObject);
+                            o.* = LispObject.nilObj();
+                            break :blk o;
+                        };
+                    }
                     if (std.mem.eql(u8, clean, "call")) return try self._evalCall(items, env);
 
                     // --- Closure application (TCO) ---
@@ -3161,8 +3129,7 @@ fn _addConstantStr(self: *Vm, s: []const u8) !u32 {
 
                     ai = 1;
                     while (ai < items.len) : (ai += 1) {
-                        const top = self.pop();
-                        if (top) |t| self.allocator.destroy(t);
+                        _ = self.pop();
                     }
                     const obj = try self.allocator.create(LispObject);
                     obj.* = LispObject.nilObj();

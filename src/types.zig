@@ -263,10 +263,8 @@ pub const Parser = struct {
                 self.pos += 1;
                 // 'expr → (quote expr)
                 const inner = self.parseSExpr(depth + 1) catch {
-                    debugPrint("quote: parse inner failed, pos={d}\n", .{self.pos});
                     return Expr.nilExpr();
                 };
-                debugPrint("quote: inner={any}, pos after={d}\n", .{inner, self.pos});
                 const quote_items: []Expr = try self.arena.allocator().dupe(
                     Expr, &[2]Expr{
                         Expr{ .symbol = try self.symtab.getOrPut("quote") },

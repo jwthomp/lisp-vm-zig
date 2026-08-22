@@ -3128,6 +3128,53 @@ fn loadAndEvalFile(vm: *Vm, env: *Environment, filename: []const u8) bool {
     return true;
 }
 
+/// Parse and evaluate a Lisp source string, returning the last result (nil if empty).
+fn evalLispSource(vm: *Vm, env: *Environment, source: []const u8) !*LispObject {
+    var arena = std.heap.ArenaAllocator.init(vm.allocator);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(vm.allocator, &arena);
+    var lexer = Lexer.init(source);
+    var tokens = std.ArrayList(Token).initCapacity(arena.allocator(), 32) catch unreachable;
+    var texts = std.ArrayList([]const u8).initCapacity(arena.allocator(), 32) catch unreachable;
+    while (true) {
+        const tok = lexer.nextToken() orelse break;
+        if (tok == .eof) break;
+        tokens.append(arena.allocator(), tok) catch unreachable;
+        texts.append(arena.allocator(), lexer.current_text) catch unreachable;
+    }
+    if (tokens.items.len == 0) {
+        const obj = try vm.allocator.create(LispObject);
+        vm.gcRegister(obj);
+        obj.* = LispObject.nilObj();
+        return obj;
+    }
+    var total_len: usize = 0;
+    for (texts.items) |t| total_len += t.len + 1;
+    const all_texts = try vm.allocator.alloc(u8, total_len);
+    var ti: usize = 0;
+    for (texts.items) |t| {
+        @memcpy(all_texts[ti .. ti + t.len], t);
+        ti += t.len;
+        all_texts[ti] = 0;
+        ti += 1;
+    }
+    var parser = Parser.init(tokens.items, all_texts, &arena, &symtab);
+    var last: ?*LispObject = null;
+    while (true) {
+        const expr = parser.parse() catch break;
+        switch (expr) {
+            .nil => break,
+            else => {},
+        }
+        last = try vm.eval(expr, env);
+    }
+    if (last) |l| return l;
+    const obj = try vm.allocator.create(LispObject);
+    vm.gcRegister(obj);
+    obj.* = LispObject.nilObj();
+    return obj;
+}
+
 pub fn main(init: std.process.Init.Minimal) void {
     if (@import("builtin").is_test) return;
 
@@ -5825,4 +5872,50 @@ test "bytecode — substr" {
     result = try vm.executeBytecode(&bc, &env);
     try std.testing.expectEqual(ObjType.string, result.type);
     try std.testing.expect(std.mem.eql(u8, result.value.string, ""));
+}
+
+test "mud engine — get_room/move/describe_room" {
+    const alloc = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var symtab = SymbolTable.init(alloc, &arena);
+    var env = Environment.init(null, alloc);
+    defer env.deinit();
+    var vm = try Vm.init(alloc, &env);
+    defer vm.deinit();
+
+    // (import mud/engine.lsp)
+    const impItems: []Expr = try alloc.dupe(Expr, &[2]Expr{
+        Expr{ .symbol = try symtab.getOrPut("import") },
+        Expr{ .symbol = try symtab.getOrPut("mud/engine.lsp") },
+    });
+    defer alloc.free(impItems);
+    _ = try vm.eval(Expr{ .list = impItems }, &env);
+
+    // Two-room world + player at gate
+    _ = try evalLispSource(&vm, &env,
+        "(def rooms (cons 'gate (cons (make_room 'gate \"South Gate\" '(north square)) nil)))" ++
+        "(def rooms (cons 'square (cons (make_room 'square \"Central Square\" '(south gate)) rooms)))" ++
+        "(def player (make_player \"Ada\" 10 'gate nil))");
+
+    // get_room returns the room record
+    const room = try evalLispSource(&vm, &env, "(get_room 'gate)");
+    try std.testing.expect(room.type == .cons);
+
+    // move 'north → player moves to square, returns new room record
+    const moved = try evalLispSource(&vm, &env, "(move 'north)");
+    try std.testing.expect(moved.type == .cons);
+    const pos = try evalLispSource(&vm, &env, "(player_pos player)");
+    try std.testing.expect(pos.type == .symbol);
+    try std.testing.expectEqualStrings("square", pos.value.symbol.name);
+
+    // Invalid direction → nil, position unchanged
+    const bad = try evalLispSource(&vm, &env, "(move 'east)");
+    try std.testing.expect(bad.type == .nil);
+    const pos2 = try evalLispSource(&vm, &env, "(player_pos player)");
+    try std.testing.expectEqualStrings("square", pos2.value.symbol.name);
+
+    // describe_room → string
+    const desc = try evalLispSource(&vm, &env, "(describe_room (get_room 'square))");
+    try std.testing.expect(desc.type == .string);
 }
