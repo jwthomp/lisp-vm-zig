@@ -12,8 +12,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Zig
         run: |
-          curl -fsSL https://ziglang.org/download/0.16.0/zig-linux-x86_64-0.16.0.tar.xz | tar xJ
-          echo "$(pwd)/zig-linux-x86_64-0.16.0" >> "$GITHUB_PATH"
+          curl -fsSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz | tar xJ
+          echo "$(pwd)/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
       - name: Run tests
         run: zig build test
 
@@ -27,8 +27,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Zig
         run: |
-          curl -fsSL https://ziglang.org/download/0.16.0/zig-linux-x86_64-0.16.0.tar.xz | tar xJ
-          echo "$(pwd)/zig-linux-x86_64-0.16.0" >> "$GITHUB_PATH"
+          curl -fsSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz | tar xJ
+          echo "$(pwd)/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
       - name: Build ${{ matrix.target }}
         run: |
           zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSmall
