@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Zig
+        run: |
+          curl -fsSL https://ziglang.org/download/0.16.0/zig-linux-x86_64-0.16.0.tar.xz | tar xJ
+          echo "$(pwd)/zig-linux-x86_64-0.16.0" >> "$GITHUB_PATH"
+      - name: Run tests
+        run: zig build test
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-linux, aarch64-linux, x86_64-macos, aarch64-macos]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Zig
+        run: |
+          curl -fsSL https://ziglang.org/download/0.16.0/zig-linux-x86_64-0.16.0.tar.xz | tar xJ
+          echo "$(pwd)/zig-linux-x86_64-0.16.0" >> "$GITHUB_PATH"
+      - name: Build ${{ matrix.target }}
+        run: |
+          zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSmall
+          mv zig-out/bin/lisp-vm "lisp-vm-${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lisp-vm-${{ matrix.target }}
+          path: lisp-vm-${{ matrix.target }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*/lisp-vm-*
+          fail_on_unmatched_files: true
