@@ -9,7 +9,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Zig
         run: |
           curl -fsSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz | tar xJ
@@ -24,7 +24,7 @@ jobs:
       matrix:
         target: [x86_64-linux, aarch64-linux, x86_64-macos, aarch64-macos]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Zig
         run: |
           curl -fsSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz | tar xJ
@@ -33,7 +33,7 @@ jobs:
         run: |
           zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSmall
           mv zig-out/bin/lisp-vm "lisp-vm-${{ matrix.target }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lisp-vm-${{ matrix.target }}
           path: lisp-vm-${{ matrix.target }}
@@ -43,10 +43,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*/lisp-vm-*
           fail_on_unmatched_files: true
